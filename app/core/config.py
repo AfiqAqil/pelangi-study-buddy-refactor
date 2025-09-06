@@ -148,6 +148,7 @@ class Settings:
         self.LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
         # LangGraph Configuration
+        self.LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # "openai" or "gemini"
         self.LLM_API_KEY = os.getenv("LLM_API_KEY", "")
         self.LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
