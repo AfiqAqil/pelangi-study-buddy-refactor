@@ -27,6 +27,7 @@ from app.core.limiter import limiter
 from app.core.logging import logger
 from app.core.metrics import setup_metrics
 from app.core.middleware import MetricsMiddleware
+from app.core.chatwoot_middleware import ChatwootWebhookMiddleware
 from app.services.database import database_service
 
 # Load environment variables
@@ -66,6 +67,10 @@ setup_metrics(app)
 
 # Add custom metrics middleware
 app.add_middleware(MetricsMiddleware)
+
+# Add Chatwoot webhook middleware
+if settings.CHATWOOT_ENABLED:
+    app.add_middleware(ChatwootWebhookMiddleware)
 
 # Set up rate limiter exception handler
 app.state.limiter = limiter

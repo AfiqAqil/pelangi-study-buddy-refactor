@@ -183,6 +183,7 @@ class Settings:
             "login": ["20 per minute"],
             "root": ["10 per minute"],
             "health": ["20 per minute"],
+            "chatwoot_webhook": ["100 per minute"],
         }
 
         # Update rate limit endpoints from environment variables
@@ -198,6 +199,16 @@ class Settings:
         self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", "https://api.openai.com/v1")
         self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.LLM_API_KEY)
         self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "10"))
+
+        # Chatwoot Integration Configuration
+        self.CHATWOOT_ENABLED = os.getenv("CHATWOOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+        self.CHATWOOT_BASE_URL = os.getenv("CHATWOOT_BASE_URL", "")
+        self.CHATWOOT_API_ACCESS_TOKEN = os.getenv("CHATWOOT_API_ACCESS_TOKEN", "")
+        self.CHATWOOT_ACCOUNT_ID = (
+            int(os.getenv("CHATWOOT_ACCOUNT_ID", "0")) if os.getenv("CHATWOOT_ACCOUNT_ID") else 0
+        )
+        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "30"))
+        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "3"))
 
         # Apply environment-specific settings
         self.apply_environment_settings()

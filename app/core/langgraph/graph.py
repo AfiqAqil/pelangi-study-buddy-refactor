@@ -149,7 +149,7 @@ class LangGraphAgent:
         for attempt in range(max_retries):
             try:
                 # Get model name - different attribute for different providers
-                model_name = getattr(self.llm, 'model_name', None) or getattr(self.llm, 'model', 'unknown')
+                model_name = getattr(self.llm, "model_name", None) or getattr(self.llm, "model", "unknown")
                 with llm_inference_duration_seconds.labels(model=model_name).time():
                     generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
                 logger.info(
@@ -178,9 +178,9 @@ class LangGraphAgent:
                         "using_fallback_model", model=fallback_model, environment=settings.ENVIRONMENT.value
                     )
                     # Set model name appropriately based on provider
-                    if hasattr(self.llm, 'model_name'):
+                    if hasattr(self.llm, "model_name"):
                         self.llm.model_name = fallback_model
-                    elif hasattr(self.llm, 'model'):
+                    elif hasattr(self.llm, "model"):
                         self.llm.model = fallback_model
 
                 continue
@@ -283,8 +283,8 @@ class LangGraphAgent:
         messages: list[Message],
         session_id: str,
         user_id: Optional[str] = None,
-    ) -> list[dict]:
-        """Get a response from the LLM.
+    ) -> dict:
+        """Get a response from the LLM with tracking of new messages.
 
         Args:
             messages (list[Message]): The messages to send to the LLM.
@@ -292,7 +292,10 @@ class LangGraphAgent:
             user_id (Optional[str]): The user ID for Langfuse tracking.
 
         Returns:
-            list[dict]: The response from the LLM.
+            dict: Contains:
+                - 'messages': All messages in the conversation
+                - 'new_messages': Only the newly generated messages
+                - 'new_start_index': Index where new messages begin
         """
         if self._graph is None:
             self._graph = await self.create_graph()
@@ -307,10 +310,26 @@ class LangGraphAgent:
             },
         }
         try:
+            # Get the state BEFORE adding new messages (using async wrapper for sync method)
+            state_before = await sync_to_async(self._graph.get_state)(config)
+            messages_before_count = len(state_before.values.get("messages", [])) if state_before.values else 0
+
+            # Invoke the graph with new messages
             response = await self._graph.ainvoke(
                 {"messages": dump_messages(messages), "session_id": session_id}, config
             )
-            return self.__process_messages(response["messages"])
+
+            # Process all messages
+            all_messages = self.__process_messages(response["messages"])
+
+            # Calculate where new messages start (after original + user input)
+            new_start_index = messages_before_count + len(messages)
+
+            return {
+                "messages": all_messages,
+                "new_messages": all_messages[new_start_index:],
+                "new_start_index": new_start_index,
+            }
         except Exception as e:
             logger.error(f"Error getting response: {str(e)}")
             raise e
