@@ -1,5 +1,6 @@
 """Chatwoot webhook endpoints for handling incoming events."""
 
+import asyncio
 import json
 import time
 from typing import Dict, Any
@@ -14,7 +15,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.langgraph.graph import LangGraphAgent
+from app.services.agent import agent_service
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.core.metrics import (
@@ -31,7 +32,6 @@ from app.schemas.chatwoot import (
 from app.services.chatwoot import chatwoot_service, ChatwootServiceError
 
 router = APIRouter()
-agent = LangGraphAgent()
 
 
 @router.post("/webhook")
@@ -72,18 +72,6 @@ async def chatwoot_webhook(
             "chatwoot_webhook_received",
             event_type=event_type,
             conversation_id=conversation_id,
-            account_id=payload.get("account", {}).get("id"),
-            inbox_id=payload.get("inbox", {}).get("id"),
-        )
-
-        # Debug: Log the full payload structure
-        logger.debug(
-            "chatwoot_webhook_full_payload",
-            event_type=event_type,
-            payload_keys=list(payload.keys()),
-            conversation_keys=list(payload.get("conversation", {}).keys()) if "conversation" in payload else [],
-            message_keys=list(payload.get("message", {}).keys()) if "message" in payload else [],
-            contact_keys=list(payload.get("contact", {}).keys()) if "contact" in payload else [],
         )
 
         # Track webhook metrics
@@ -99,13 +87,13 @@ async def chatwoot_webhook(
                 # Process message asynchronously to avoid blocking webhook response
                 background_tasks.add_task(process_incoming_message, webhook_data)
 
-                logger.info(
+                logger.debug(
                     "chatwoot_message_queued_for_processing",
                     message_id=webhook_data.id,
                     conversation_id=conversation_id,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "chatwoot_outgoing_message_ignored", message_id=webhook_data.id, conversation_id=conversation_id
                 )
 
@@ -113,7 +101,7 @@ async def chatwoot_webhook(
             # Parse as conversation webhook
             webhook_data = ChatwootConversationWebhook(**payload)
 
-            logger.info(
+            logger.debug(
                 "chatwoot_conversation_created",
                 conversation_id=conversation_id,
                 status=webhook_data.conversation.status,
@@ -123,19 +111,18 @@ async def chatwoot_webhook(
             # Parse as conversation webhook
             webhook_data = ChatwootConversationWebhook(**payload)
 
-            logger.info(
+            logger.debug(
                 "chatwoot_conversation_status_changed",
                 conversation_id=conversation_id,
                 status=webhook_data.conversation.status,
-                changed_attributes=webhook_data.changed_attributes,
             )
 
         elif event_type in [ChatwootEventType.CONVERSATION_TYPING_ON, ChatwootEventType.CONVERSATION_TYPING_OFF]:
             # Log typing events but don't process them
-            logger.info("chatwoot_typing_event", event_type=event_type, conversation_id=conversation_id)
+            logger.debug("chatwoot_typing_event", event_type=event_type, conversation_id=conversation_id)
 
         else:
-            logger.info("chatwoot_unhandled_event", event_type=event_type, conversation_id=conversation_id)
+            logger.debug("chatwoot_unhandled_event", event_type=event_type, conversation_id=conversation_id)
 
         # Always return 200 to acknowledge receipt
         return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "received", "event": event_type})
@@ -178,15 +165,11 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
             "chatwoot_processing_message",
             message_id=message_id,
             conversation_id=conversation.id,
-            contact_id=sender.id,
-            content_preview=message_content[:100],
-            message_type=message_type,
-            sender_name=sender.name,
         )
 
         # Skip empty messages or system messages
         if not message_content or not message_content.strip():
-            logger.info("chatwoot_empty_message_skipped", message_id=message_id)
+            logger.debug("chatwoot_empty_message_skipped", message_id=message_id)
             return
 
         # Convert Chatwoot message to internal format
@@ -198,53 +181,38 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
         # Generate user ID from sender information
         user_id = f"chatwoot_contact_{sender.id}"
 
-        logger.info("chatwoot_invoking_agent", session_id=session_id, user_id=user_id, conversation_id=conversation.id)
+        logger.debug("chatwoot_invoking_agent", session_id=session_id, conversation_id=conversation.id)
 
         # Get response from LangGraph agent
+        agent = agent_service.get_agent()
         response = await agent.get_response(messages=[internal_message], session_id=session_id, user_id=user_id)
 
-        # Send only NEW assistant messages back to Chatwoot
+        # Send only NEW assistant messages back to Chatwoot (with concurrent processing)
+        send_tasks = []
         for agent_msg in response["new_messages"]:
             if agent_msg.role == "assistant" and agent_msg.content:
-                try:
-                    # Convert internal message to Chatwoot format
-                    chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
+                # Convert internal message to Chatwoot format
+                chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
+                # Create concurrent task for sending message
+                send_tasks.append(
+                    send_message_with_error_handling(conversation.id, chatwoot_message)
+                )
+        
+        # Mark conversation as read concurrently with message sending (fire-and-forget)
+        mark_read_task = asyncio.create_task(
+            mark_conversation_read_with_error_handling(conversation.id)
+        )
+        
+        # Execute all message sending tasks concurrently for better performance
+        if send_tasks:
+            await asyncio.gather(*send_tasks, return_exceptions=True)
+        
+        # Note: mark_read_task runs concurrently and doesn't block response
 
-                    # Send message to Chatwoot
-                    response_msg = await chatwoot_service.send_message(
-                        conversation_id=conversation.id, message=chatwoot_message
-                    )
-
-                    # Track successful message sending
-                    chatwoot_messages_sent_total.labels(status="success").inc()
-
-                    logger.info(
-                        "chatwoot_message_sent",
-                        conversation_id=conversation.id,
-                        message_id=response_msg.id,
-                        content_preview=agent_msg.content[:100],
-                    )
-
-                except ChatwootServiceError as e:
-                    # Track failed message sending
-                    chatwoot_messages_sent_total.labels(status="failed").inc()
-
-                    logger.error("chatwoot_send_message_failed", conversation_id=conversation.id, error=str(e))
-                    # Continue processing other messages even if one fails
-                    continue
-
-        # Mark conversation as read by the agent
-        try:
-            await chatwoot_service.mark_conversation_as_read(conversation.id)
-        except ChatwootServiceError as e:
-            logger.warning("chatwoot_mark_read_failed", conversation_id=conversation.id, error=str(e))
-            # Non-critical error, continue
-
-        logger.info(
+        logger.debug(
             "chatwoot_message_processing_completed",
             message_id=message_id,
             conversation_id=conversation.id,
-            responses_sent=len([msg for msg in response["new_messages"] if msg.role == "assistant"]),
         )
 
         processing_status = "success"
@@ -293,7 +261,7 @@ async def chatwoot_health_check(request: Request) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Health status information
     """
-    logger.info("chatwoot_health_check_called")
+    logger.debug("chatwoot_health_check_called")
 
     health_info = {
         "status": "healthy",
@@ -333,7 +301,7 @@ async def chatwoot_config(request: Request) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Configuration information (sanitized)
     """
-    logger.info("chatwoot_config_requested")
+    logger.debug("chatwoot_config_requested")
 
     return {
         "enabled": settings.CHATWOOT_ENABLED,
@@ -343,3 +311,40 @@ async def chatwoot_config(request: Request) -> Dict[str, Any]:
         "timeout": settings.CHATWOOT_TIMEOUT,
         "max_retries": settings.CHATWOOT_MAX_RETRIES,
     }
+
+
+# Helper functions for concurrent API operations
+async def send_message_with_error_handling(conversation_id: int, chatwoot_message) -> None:
+    """Send message to Chatwoot with proper error handling for concurrent execution."""
+    try:
+        response_msg = await chatwoot_service.send_message(
+            conversation_id=conversation_id, message=chatwoot_message
+        )
+        
+        # Track successful message sending
+        chatwoot_messages_sent_total.labels(status="success").inc()
+        
+        logger.debug(
+            "chatwoot_message_sent",
+            conversation_id=conversation_id,
+            message_id=response_msg.id,
+        )
+        
+    except ChatwootServiceError as e:
+        # Track failed message sending
+        chatwoot_messages_sent_total.labels(status="failed").inc()
+        logger.error("chatwoot_send_message_failed", conversation_id=conversation_id, error=str(e))
+    except Exception as e:
+        logger.error("chatwoot_send_message_unexpected_error", conversation_id=conversation_id, error=str(e))
+
+
+async def mark_conversation_read_with_error_handling(conversation_id: int) -> None:
+    """Mark conversation as read with proper error handling for concurrent execution."""
+    try:
+        await chatwoot_service.mark_conversation_as_read(conversation_id)
+    except ChatwootServiceError as e:
+        logger.warning("chatwoot_mark_read_failed", conversation_id=conversation_id, error=str(e))
+    except Exception as e:
+        logger.error("chatwoot_mark_read_unexpected_error", conversation_id=conversation_id, error=str(e))
+
+

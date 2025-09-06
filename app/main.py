@@ -29,6 +29,9 @@ from app.core.metrics import setup_metrics
 from app.core.middleware import MetricsMiddleware
 from app.core.chatwoot_middleware import ChatwootWebhookMiddleware
 from app.services.database import database_service
+from app.services.redis import redis_service
+from app.services.chatwoot import chatwoot_service
+from app.services.agent import agent_service
 
 # Load environment variables
 load_dotenv()
@@ -50,7 +53,38 @@ async def lifespan(app: FastAPI):
         version=settings.VERSION,
         api_prefix=settings.API_V1_STR,
     )
+
+    # Initialize Redis service
+    try:
+        await redis_service.initialize()
+        logger.info("redis_service_initialized", enabled=settings.REDIS_ENABLED)
+    except Exception as e:
+        logger.error("redis_service_initialization_failed", error=str(e))
+        if settings.ENVIRONMENT.value != "production":
+            # In non-production environments, we might want to know about Redis issues
+            logger.warning("continuing_without_redis", message="Application will continue without Redis caching")
+
     yield
+
+    # Cleanup on shutdown
+    try:
+        await redis_service.close()
+        logger.info("redis_service_closed")
+    except Exception as e:
+        logger.error("redis_service_close_failed", error=str(e))
+
+    try:
+        await chatwoot_service.close()
+        logger.info("chatwoot_service_closed")
+    except Exception as e:
+        logger.error("chatwoot_service_close_failed", error=str(e))
+
+    try:
+        await agent_service.close()
+        logger.info("agent_service_closed")
+    except Exception as e:
+        logger.error("agent_service_close_failed", error=str(e))
+
     logger.info("application_shutdown")
 
 

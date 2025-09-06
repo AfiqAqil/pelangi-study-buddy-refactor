@@ -30,15 +30,19 @@ class ChatwootServiceError(Exception):
 
 
 class ChatwootService:
-    """Service for interacting with the Chatwoot API."""
+    """Service for interacting with the Chatwoot API with connection pooling."""
 
     def __init__(self):
-        """Initialize the Chatwoot service with configuration."""
+        """Initialize the Chatwoot service with configuration and connection pool."""
         self.base_url = settings.CHATWOOT_BASE_URL.rstrip("/")
         self.api_access_token = settings.CHATWOOT_API_ACCESS_TOKEN
         self.account_id = settings.CHATWOOT_ACCOUNT_ID
         self.timeout = ClientTimeout(total=settings.CHATWOOT_TIMEOUT)
         self.max_retries = settings.CHATWOOT_MAX_RETRIES
+
+        # HTTP session and connection pool
+        self.connector = None
+        self.session = None
 
         # Validate configuration
         if not all([self.base_url, self.api_access_token, self.account_id]):
@@ -48,6 +52,54 @@ class ChatwootService:
                 api_token=bool(self.api_access_token),
                 account_id=bool(self.account_id),
             )
+
+    async def _get_session(self):
+        """Get or create HTTP session with connection pooling."""
+        if self.session is None or self.session.closed:
+            # Create connector with optimized connection pooling for performance
+            self.connector = aiohttp.TCPConnector(
+                limit=50,  # Reduced total pool size for faster connection reuse
+                limit_per_host=10,  # Reduced per-host limit for faster cycling
+                keepalive_timeout=60,  # Increased keepalive for better reuse
+                enable_cleanup_closed=True,  # Clean up closed connections
+                use_dns_cache=True,  # Cache DNS lookups
+                ttl_dns_cache=600,  # Longer DNS cache TTL for performance
+                family=0,  # Use both IPv4 and IPv6
+                force_close=False,  # Reuse connections more aggressively
+            )
+
+            # Create session with pooled connector and proper timeout configuration
+            timeout = aiohttp.ClientTimeout(
+                total=self.timeout.total,  # Overall timeout
+                connect=10,  # Connection timeout
+                sock_read=self.timeout.total,  # Socket read timeout
+            )
+            
+            self.session = aiohttp.ClientSession(
+                connector=self.connector,
+                timeout=timeout,
+                headers={
+                    "api_access_token": self.api_access_token,
+                    "Content-Type": "application/json",
+                    "User-Agent": f"FastAPI-LangGraph-Agent/{settings.ENVIRONMENT.value}",
+                },
+            )
+
+            logger.debug(
+                "chatwoot_session_created", pool_limit=50, per_host_limit=10, timeout=settings.CHATWOOT_TIMEOUT
+            )
+
+        return self.session
+
+    async def close(self):
+        """Close HTTP session and connector."""
+        if self.session:
+            await self.session.close()
+            self.session = None
+        if self.connector:
+            await self.connector.close()
+            self.connector = None
+        logger.debug("chatwoot_service_closed")
 
     async def _make_request(
         self,
@@ -71,56 +123,47 @@ class ChatwootService:
             ChatwootServiceError: If the API request fails after retries
         """
         url = f"{self.base_url}/api/v1/accounts/{self.account_id}/{endpoint}"
-        headers = {
-            "api_access_token": self.api_access_token,
-            "Content-Type": "application/json",
-        }
 
         # Track request start time for metrics
         request_start_time = time.time()
 
         for attempt in range(self.max_retries):
             try:
-                async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                    async with session.request(
-                        method=method, url=url, json=data, params=params, headers=headers
-                    ) as response:
-                        response_data = await response.json()
+                # Use pooled session instead of creating new one each time
+                session = await self._get_session()
+                async with session.request(method=method, url=url, json=data, params=params) as response:
+                    response_data = await response.json()
 
-                        if response.status == 200 or response.status == 201:
-                            # Track successful API request metrics
-                            duration = time.time() - request_start_time
-                            chatwoot_api_requests_total.labels(
-                                endpoint=endpoint, method=method, status="success"
-                            ).inc()
-                            chatwoot_api_request_duration_seconds.labels(endpoint=endpoint, method=method).observe(
-                                duration
-                            )
+                    if response.status == 200 or response.status == 201:
+                        # Track successful API request metrics
+                        duration = time.time() - request_start_time
+                        chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="success").inc()
+                        chatwoot_api_request_duration_seconds.labels(endpoint=endpoint, method=method).observe(
+                            duration
+                        )
 
-                            logger.info(
-                                "chatwoot_api_success",
-                                method=method,
-                                endpoint=endpoint,
-                                status=response.status,
-                                attempt=attempt + 1,
-                                duration=duration,
-                            )
-                            return response_data
-                        else:
-                            logger.warning(
-                                "chatwoot_api_error",
-                                method=method,
-                                endpoint=endpoint,
-                                status=response.status,
-                                response=response_data,
-                                attempt=attempt + 1,
-                            )
+                        logger.debug(
+                            "chatwoot_api_success",
+                            method=method,
+                            endpoint=endpoint,
+                            status=response.status,
+                        )
+                        return response_data
+                    else:
+                        logger.warning(
+                            "chatwoot_api_error",
+                            method=method,
+                            endpoint=endpoint,
+                            status=response.status,
+                            response=response_data,
+                            attempt=attempt + 1,
+                        )
 
-                            # Don't retry for client errors (4xx)
-                            if 400 <= response.status < 500:
-                                raise ChatwootServiceError(
-                                    f"Chatwoot API client error: {response.status} - {response_data}"
-                                )
+                        # Don't retry for client errors (4xx) - fail fast
+                        if 400 <= response.status < 500:
+                            raise ChatwootServiceError(
+                                f"Chatwoot API client error: {response.status} - {response_data}"
+                            )
 
             except ClientError as e:
                 logger.error(
@@ -131,8 +174,8 @@ class ChatwootService:
                 if attempt == self.max_retries - 1:
                     raise ChatwootServiceError(f"Chatwoot API request failed: {str(e)}")
 
-                # Wait before retrying (exponential backoff)
-                await asyncio.sleep(2**attempt)
+                # Linear backoff instead of exponential - much faster recovery
+                await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s instead of 1s, 2s, 4s
 
             except Exception as e:
                 logger.error(
@@ -146,7 +189,8 @@ class ChatwootService:
                 if attempt == self.max_retries - 1:
                     raise ChatwootServiceError(f"Unexpected error in Chatwoot API: {str(e)}")
 
-                await asyncio.sleep(2**attempt)
+                # Linear backoff for faster recovery
+                await asyncio.sleep(0.5 * (attempt + 1))
 
         # Track failed API request (if we reach this point, all retries failed)
         chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="failed").inc()
@@ -170,11 +214,10 @@ class ChatwootService:
             endpoint = f"conversations/{conversation_id}/messages"
             data = message.model_dump()
 
-            logger.info(
+            logger.debug(
                 "chatwoot_sending_message",
                 conversation_id=conversation_id,
                 message_type=message.message_type,
-                content_preview=message.content[:100],
             )
 
             response_data = await self._make_request("POST", endpoint, data)
@@ -244,7 +287,7 @@ class ChatwootService:
             endpoint = f"conversations/{conversation_id}/toggle_status"
             data = {"status": status}
 
-            logger.info("chatwoot_updating_conversation_status", conversation_id=conversation_id, status=status)
+            logger.debug("chatwoot_updating_conversation_status", conversation_id=conversation_id, status=status)
 
             response_data = await self._make_request("POST", endpoint, data)
 
@@ -310,7 +353,7 @@ class ChatwootService:
         try:
             endpoint = f"conversations/{conversation_id}/update_last_seen"
 
-            logger.info("chatwoot_marking_conversation_read", conversation_id=conversation_id)
+            logger.debug("chatwoot_marking_conversation_read", conversation_id=conversation_id)
 
             await self._make_request("POST", endpoint)
 

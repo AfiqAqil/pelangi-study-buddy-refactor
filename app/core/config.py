@@ -169,6 +169,13 @@ class Settings:
         self.POSTGRES_URL = os.getenv("POSTGRES_URL", "")
         self.POSTGRES_POOL_SIZE = int(os.getenv("POSTGRES_POOL_SIZE", "20"))
         self.POSTGRES_MAX_OVERFLOW = int(os.getenv("POSTGRES_MAX_OVERFLOW", "10"))
+        
+        # LangGraph AsyncConnectionPool specific settings
+        self.POSTGRES_CONNECT_TIMEOUT = int(os.getenv("POSTGRES_CONNECT_TIMEOUT", "10"))
+        self.POSTGRES_POOL_TIMEOUT = int(os.getenv("POSTGRES_POOL_TIMEOUT", "30"))
+        self.POSTGRES_MAX_IDLE = int(os.getenv("POSTGRES_MAX_IDLE", "300"))  # 5 minutes
+        self.POSTGRES_MAX_LIFETIME = int(os.getenv("POSTGRES_MAX_LIFETIME", "3600"))  # 1 hour
+        
         self.CHECKPOINT_TABLES = ["checkpoint_blobs", "checkpoint_writes", "checkpoints"]
 
         # Rate Limiting Configuration
@@ -207,8 +214,27 @@ class Settings:
         self.CHATWOOT_ACCOUNT_ID = (
             int(os.getenv("CHATWOOT_ACCOUNT_ID", "0")) if os.getenv("CHATWOOT_ACCOUNT_ID") else 0
         )
-        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "30"))
-        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "3"))
+        # Optimized for performance - shorter timeouts, fewer retries
+        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "15"))  # Reduced from 30s to 15s
+        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "2"))  # Reduced from 3 to 2
+
+        # Redis Configuration
+        self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+        self.REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+        self.REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+        self.REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+        self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+        self.REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
+        self.REDIS_SOCKET_CONNECT_TIMEOUT = int(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5"))
+        self.REDIS_SOCKET_KEEPALIVE = os.getenv("REDIS_SOCKET_KEEPALIVE", "true").lower() in ("true", "1", "t", "yes")
+        self.REDIS_SOCKET_KEEPALIVE_OPTIONS = {}
+
+        # Cache Configuration - Optimized for performance
+        self.CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "600"))  # Increased to 10 minutes
+        self.CACHE_MESSAGE_COUNT_TTL = int(os.getenv("CACHE_MESSAGE_COUNT_TTL", "600"))  # Increased to 10 minutes
+        self.CACHE_CONVERSATION_TTL = int(os.getenv("CACHE_CONVERSATION_TTL", "1800"))  # 30 minutes
+        self.CACHE_CONTACT_TTL = int(os.getenv("CACHE_CONTACT_TTL", "3600"))  # 1 hour
 
         # Apply environment-specific settings
         self.apply_environment_settings()

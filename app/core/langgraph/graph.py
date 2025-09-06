@@ -1,5 +1,6 @@
 """This file contains the LangGraph Agent/workflow and interactions with the LLM."""
 
+import asyncio
 from typing import (
     Any,
     AsyncGenerator,
@@ -113,14 +114,28 @@ class LangGraphAgent:
                     settings.POSTGRES_URL,
                     open=False,
                     max_size=max_size,
+                    min_size=2,  # Maintain minimum connections
                     kwargs={
                         "autocommit": True,
-                        "connect_timeout": 5,
+                        "connect_timeout": settings.POSTGRES_CONNECT_TIMEOUT,
+                        "application_name": f"langgraph-agent-{settings.ENVIRONMENT.value}",
                         "prepare_threshold": None,
                     },
+                    # Pool configuration
+                    timeout=settings.POSTGRES_POOL_TIMEOUT,
+                    max_idle=settings.POSTGRES_MAX_IDLE,
+                    max_lifetime=settings.POSTGRES_MAX_LIFETIME,
                 )
                 await self._connection_pool.open()
-                logger.info("connection_pool_created", max_size=max_size, environment=settings.ENVIRONMENT.value)
+                logger.info(
+                    "connection_pool_created", 
+                    max_size=max_size, 
+                    min_size=2,
+                    timeout=settings.POSTGRES_POOL_TIMEOUT,
+                    max_idle=settings.POSTGRES_MAX_IDLE,
+                    max_lifetime=settings.POSTGRES_MAX_LIFETIME,
+                    environment=settings.ENVIRONMENT.value
+                )
             except Exception as e:
                 logger.error("connection_pool_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
                 # In production, we might want to degrade gracefully
@@ -129,6 +144,16 @@ class LangGraphAgent:
                     return None
                 raise e
         return self._connection_pool
+
+    async def close_connection_pool(self) -> None:
+        """Close the PostgreSQL connection pool gracefully."""
+        if self._connection_pool:
+            try:
+                await self._connection_pool.close()
+                self._connection_pool = None
+                logger.info("connection_pool_closed", environment=settings.ENVIRONMENT.value)
+            except Exception as e:
+                logger.error("connection_pool_close_failed", error=str(e), environment=settings.ENVIRONMENT.value)
 
     async def _chat(self, state: GraphState) -> dict:
         """Process the chat state and generate a response.
@@ -310,9 +335,34 @@ class LangGraphAgent:
             },
         }
         try:
-            # Get the state BEFORE adding new messages (using async wrapper for sync method)
-            state_before = await sync_to_async(self._graph.get_state)(config)
-            messages_before_count = len(state_before.values.get("messages", [])) if state_before.values else 0
+            # Try to get message count from Redis cache first (performance optimization)
+            from app.services.redis import redis_service
+            from app.core.cache import ConversationCache
+
+            async def fetch_message_count():
+                # Optimized: Use async database query with timeout
+                try:
+                    # Set timeout for database queries to prevent hanging
+                    import asyncio
+                    state_before = await asyncio.wait_for(
+                        sync_to_async(self._graph.get_state)(config),
+                        timeout=3.0  # 3 second timeout
+                    )
+                    return len(state_before.values.get("messages", [])) if state_before.values else 0
+                except asyncio.TimeoutError:
+                    logger.warning("db_state_query_timeout", session_id=session_id)
+                    # Return 0 for new conversations to avoid blocking
+                    return 0
+                except Exception as e:
+                    logger.error("db_state_query_failed", session_id=session_id, error=str(e))
+                    return 0
+
+            # Get message count from cache or database with faster cache TTL
+            messages_before_count = await ConversationCache.get_or_set_message_count(
+                session_id,
+                fetch_message_count,
+                ttl=600,  # Cache for 10 minutes (longer cache)
+            )
 
             # Invoke the graph with new messages
             response = await self._graph.ainvoke(
@@ -324,6 +374,20 @@ class LangGraphAgent:
 
             # Calculate where new messages start (after original + user input)
             new_start_index = messages_before_count + len(messages)
+
+            # Update cache with new message count for next request
+            new_message_count = len(all_messages)
+            if new_message_count > messages_before_count:
+                # Use fire-and-forget cache update to avoid blocking response
+                asyncio.create_task(
+                    redis_service.set_message_count(session_id, new_message_count, ttl=600)
+                )
+                logger.debug(
+                    "message_count_cache_updated",
+                    session_id=session_id,
+                    old_count=messages_before_count,
+                    new_count=new_message_count,
+                )
 
             return {
                 "messages": all_messages,
@@ -410,17 +474,38 @@ class LangGraphAgent:
         try:
             # Make sure the pool is initialized in the current event loop
             conn_pool = await self._get_connection_pool()
+            
+            if conn_pool is None:
+                logger.warning("no_connection_pool", session_id=session_id, message="Cannot clear history without connection pool")
+                return
 
-            # Use a new connection for this specific operation
-            async with conn_pool.connection() as conn:
-                for table in settings.CHECKPOINT_TABLES:
-                    try:
-                        await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
-                        logger.info(f"Cleared {table} for session {session_id}")
-                    except Exception as e:
-                        logger.error(f"Error clearing {table}", error=str(e))
-                        raise
+            # Use a connection with timeout and retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with conn_pool.connection() as conn:
+                        for table in settings.CHECKPOINT_TABLES:
+                            try:
+                                await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
+                                logger.info(f"Cleared {table} for session {session_id}")
+                            except Exception as table_error:
+                                logger.error(f"Error clearing {table}", error=str(table_error), session_id=session_id)
+                                raise table_error
+                    break  # Success, exit retry loop
+                    
+                except Exception as conn_error:
+                    logger.warning(
+                        "connection_retry",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        error=str(conn_error),
+                        session_id=session_id
+                    )
+                    if attempt == max_retries - 1:
+                        raise conn_error
+                    # Wait before retry with exponential backoff
+                    await asyncio.sleep(2 ** attempt)
 
         except Exception as e:
-            logger.error("Failed to clear chat history", error=str(e))
+            logger.error("Failed to clear chat history", error=str(e), session_id=session_id)
             raise
