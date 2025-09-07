@@ -36,7 +36,8 @@ class QuestionsBank(BaseModel, table=True):
         contains_calculations: Whether calculations are involved
         knowledge_snippet: Knowledge snippet for context
         knowledge_snippet_type: Type of knowledge snippet
-        image_uri: URI for associated image
+        question_image_uri: URI for question-associated image
+        answer_image_uri: URI for answer-associated image
         created_at: When the question was created
 
         # Relationships
@@ -72,7 +73,8 @@ class QuestionsBank(BaseModel, table=True):
     contains_calculations: Optional[bool] = Field(default=None, description="Whether calculations are involved")
     knowledge_snippet: Optional[str] = Field(default=None, description="Knowledge snippet for context")
     knowledge_snippet_type: Optional[str] = Field(default=None, description="Type of knowledge snippet")
-    image_uri: Optional[str] = Field(default=None, description="URI for associated image")
+    question_image_uri: Optional[str] = Field(default=None, description="URI for question-associated image")
+    answer_image_uri: Optional[str] = Field(default=None, description="URI for answer-associated image")
 
     # Relationships
     quiz_attempts: List["QuizAttempt"] = Relationship(back_populates="question")

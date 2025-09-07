@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from app.core.logging import logger
 from app.services.subject_service import subject_service
 from app.services.database import database_service
+from app.schemas.graph import ToolResult
 
 
 class SubjectSelectionInput(BaseModel):
@@ -48,7 +49,7 @@ class SubjectSelectionTool(BaseTool):
             user_id: User ID
 
         Returns:
-            Confirmation message about subject selection
+            JSON string of ToolResult with subject selection outcome
         """
         try:
             logger.info("subject_selection_tool_called", subject_input=subject_input, user_id=user_id)
@@ -58,43 +59,61 @@ class SubjectSelectionTool(BaseTool):
 
             if not found_subject:
                 logger.warning("subject_not_found_in_tool", input=subject_input, user_id=user_id)
-
-                # Get available subjects for user reference
+                
                 available_subjects = await subject_service.get_available_subjects()
-                subject_list_message = subject_service.format_subject_selection_message(
-                    available_subjects, f"Sorry, I couldn't find '{subject_input}'. Here are the available subjects:"
+                subject_list = subject_service.format_subject_selection_message(
+                    available_subjects, f"'{subject_input}' not found. Available subjects:"
                 )
 
-                return f"❌ Subject '{subject_input}' not found.\n\n{subject_list_message}"
+                result = ToolResult(
+                    content=f"❌ Subject '{subject_input}' not found.\n\n{subject_list}",
+                    status="error",
+                    next_action="retry_with_valid_subject",
+                    data={"available_subjects": [s["name"] for s in available_subjects]}
+                )
+                return result.model_dump_json()
 
             # Set as user's focus subject
             success = await subject_service.set_user_focus_subject(user_id, found_subject["id"])
 
             if not success:
                 logger.error("failed_to_set_focus_subject_in_tool", user_id=user_id, subject_id=found_subject["id"])
-                return f"❌ Sorry, I couldn't set '{found_subject['name']}' as your focus subject. Please try again."
+                result = ToolResult(
+                    content=f"❌ Failed to set '{found_subject['name']}' as focus subject. Please try again.",
+                    status="retry",
+                    next_action="retry_subject_selection"
+                )
+                return result.model_dump_json()
 
-            logger.info(
-                "subject_selected_via_tool", user_id=user_id, subject_name=found_subject["name"], input=subject_input
-            )
+            logger.info("subject_selected_via_tool", user_id=user_id, subject_name=found_subject["name"])
 
-            # Create response with subject context
             alt_names = found_subject.get("alt_names", [])
-            alt_names_text = f" (also known as: {', '.join(alt_names)})" if alt_names else ""
+            alt_text = f" (also: {', '.join(alt_names)})" if alt_names else ""
 
-            response = f"✅ Perfect! I've set **{found_subject['name']}**{alt_names_text} as your focus subject.\n\n"
-            response += "🎯 **What this means:**\n"
-            response += "• All my explanations will be tailored to this subject\n"
-            response += "• Quiz questions will focus on this subject content\n"
-            response += "• I'll use subject-specific terminology and examples\n"
-            response += "• My responses will reference the relevant textbook content\n\n"
-            response += f"📚 **Ready to help with {found_subject['name']}!** What would you like to learn about?"
+            content = f"✅ **{found_subject['name']}**{alt_text} is now your focus subject!\n\n"
+            content += "🎯 All explanations, quizzes, and examples will be tailored to this subject.\n\n"
+            content += f"📚 Ready to help with {found_subject['name']}! What would you like to learn?"
 
-            return response
+            result = ToolResult(
+                content=content,
+                status="complete",
+                next_action="respond_to_user",
+                data={
+                    "selected_subject": found_subject["name"],
+                    "subject_id": found_subject["id"],
+                    "book_code": found_subject.get("book_code")
+                }
+            )
+            return result.model_dump_json()
 
         except Exception as e:
             logger.error("subject_selection_tool_error", error=str(e), user_id=user_id, subject_input=subject_input)
-            return "❌ An error occurred while selecting the subject. Please try again or contact support."
+            result = ToolResult(
+                content="❌ An error occurred while selecting the subject. Please try again or contact support.",
+                status="error",
+                next_action="retry_or_contact_support"
+            )
+            return result.model_dump_json()
 
 
 class SubjectContextInput(BaseModel):
@@ -155,6 +174,7 @@ class SubjectContextTool(BaseTool):
                 response += "\n"
             else:
                 response += "❓ **No subject currently selected**\n\n"
+                response += "⚠️ **IMPORTANT:** You need to select a subject first before I can help with academic questions!\n\n"
 
             # Show user's subject preferences if available
             if user:

@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from typing import Annotated, Dict, Any
+from typing import Annotated, Dict, Any, List, Literal, Optional
 
 from langgraph.graph.message import add_messages
 from pydantic import (
@@ -14,11 +14,20 @@ from pydantic import (
 from app.core.logging import logger
 
 
+class ToolResult(BaseModel):
+    """Result from tool execution with lifecycle information."""
+    
+    content: str = Field(..., description="User-facing message")
+    status: Literal["complete", "partial", "error", "retry"] = Field(..., description="Tool execution status")
+    next_action: Optional[str] = Field(None, description="Hint for next action")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Structured data from tool")
+
+
 class GraphState(BaseModel):
     """State definition for the LangGraph Agent/Workflow with versioning support."""
 
     # Current schema version
-    CURRENT_VERSION: int = 1
+    CURRENT_VERSION: int = 2
 
     version: int = Field(default=CURRENT_VERSION, description="State schema version for migrations")
     messages: Annotated[list, add_messages] = Field(
@@ -26,6 +35,11 @@ class GraphState(BaseModel):
     )
     session_id: str = Field(..., description="The unique identifier for the conversation session")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata for extensibility")
+    
+    # Tool lifecycle fields (added in version 2)
+    last_tool_result: Optional[ToolResult] = Field(None, description="Result from last tool execution")
+    max_iterations: int = Field(default=20, description="Maximum allowed chat/tool cycles")
+    iteration_count: int = Field(default=0, description="Number of chat/tool cycles completed")
 
     @field_validator("session_id")
     @classmethod
@@ -96,8 +110,13 @@ class GraphState(BaseModel):
             # For now, version 1 is the initial version
             return state.model_copy(update={"version": 1})
         elif target_version == 2:
-            # Example future migration from v1 to v2 would be implemented here
-            pass
+            # Migration from v1 to v2: Add tool lifecycle fields
+            return state.model_copy(update={
+                "version": 2,
+                "last_tool_result": None,
+                "max_iterations": 20,
+                "iteration_count": 0
+            })
 
         # If no specific migration is needed, just update version
         return state.model_copy(update={"version": target_version})

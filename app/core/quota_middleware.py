@@ -1,8 +1,10 @@
 """Quota validation middleware for API endpoints."""
 
 from typing import Callable, Optional
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 import asyncio
 import time
 
@@ -10,11 +12,16 @@ from app.core.logging import logger
 from app.services.quota_service import quota_service, QuotaValidationResult
 
 
-class QuotaMiddleware:
+class QuotaMiddleware(BaseHTTPMiddleware):
     """Middleware for quota validation and recording."""
 
-    def __init__(self):
-        """Initialize quota middleware."""
+    def __init__(self, app):
+        """Initialize quota middleware.
+        
+        Args:
+            app: The FastAPI application instance
+        """
+        super().__init__(app)
         self.quota_exempt_paths = {
             "/api/v1/auth/",
             "/api/v1/health",
@@ -30,12 +37,16 @@ class QuotaMiddleware:
             "/api/v1/chatbot/chat": "message",
             "/api/v1/chatbot/stream": "message",
             "/api/v1/chatwoot/webhook": "message",  # Chatwoot messages
-            # Quiz endpoints would require quiz quota (when implemented)
-            # "/api/v1/quiz/generate": "quiz",
-            # "/api/v1/quiz/attempt": "quiz",
+            # Quiz endpoints require quiz quota
+            "/api/v1/questions/quiz/random": "quiz",
+            "/api/v1/questions/quiz/start": "quiz",
+            "/api/v1/questions/quiz/grade": "quiz",
+            # QnA/RAG endpoints require message quota (similar to chat)
+            "/api/v1/questions/ask": "message",
+            "/api/v1/questions/search": "message",
         }
 
-    async def __call__(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process request with quota validation.
 
         Args:
@@ -199,10 +210,23 @@ class QuotaMiddleware:
             if quota_type == "message":
                 await quota_service.record_message_sent(user_id)
             elif quota_type == "quiz":
-                # For quiz, we need to determine if it was answered correctly
-                # This would typically be extracted from the response or request body
-                # For now, just record as attempted
-                await quota_service.record_quiz_attempt(user_id, answered=False)
+                # For quiz endpoints, record based on the specific action
+                # - quiz/random and quiz/start: count as quiz attempts
+                # - quiz/grade: determine if answered correctly from response
+                try:
+                    # Try to extract response body to check for quiz grading result
+                    import json
+                    response_body = getattr(response, 'body', None)
+                    if response_body:
+                        response_data = json.loads(response_body)
+                        is_correct = response_data.get('is_correct', False)
+                        await quota_service.record_quiz_attempt(user_id, answered=is_correct)
+                    else:
+                        # For quiz/random and quiz/start, just record as attempt
+                        await quota_service.record_quiz_attempt(user_id, answered=False)
+                except (json.JSONDecodeError, AttributeError):
+                    # Fallback: record as quiz attempt without correctness info
+                    await quota_service.record_quiz_attempt(user_id, answered=False)
 
             logger.debug("quota_usage_recorded", user_id=user_id, quota_type=quota_type)
 
@@ -223,6 +247,3 @@ class QuotaMiddleware:
             logger.debug("failed_to_add_quota_headers", error=str(e))
             # Non-critical error, don't fail the response
 
-
-# Create middleware instance
-quota_middleware = QuotaMiddleware()

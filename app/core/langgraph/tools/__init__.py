@@ -9,6 +9,12 @@ from langchain_core.tools.base import BaseTool
 
 from .duckduckgo_search import duckduckgo_search_tool
 from .subject_selection import subject_selection_tool, subject_context_tool
+from .quiz_tools import (
+    grade_quiz_answer_tool,
+    format_quiz_question_tool,
+    calculate_quiz_summary_tool,
+    get_adaptive_quiz_question_tool
+)
 
 # Import RAG tools conditionally based on configuration
 try:
@@ -23,12 +29,20 @@ try:
             qdrant_retriever_tool,
             generate_rag_answer_tool,
             comprehensive_rag_search_tool,
+            grade_quiz_answer_tool,
+            format_quiz_question_tool,
+            calculate_quiz_summary_tool,
+            get_adaptive_quiz_question_tool,
         ]
     else:
         tools: list[BaseTool] = [
             duckduckgo_search_tool,
             subject_selection_tool,
             subject_context_tool,
+            grade_quiz_answer_tool,
+            format_quiz_question_tool,
+            calculate_quiz_summary_tool,
+            get_adaptive_quiz_question_tool,
         ]
 except ImportError as e:
     # Fallback if RAG dependencies are not installed
@@ -37,4 +51,8 @@ except ImportError as e:
         duckduckgo_search_tool,
         subject_selection_tool, 
         subject_context_tool,
+        grade_quiz_answer_tool,
+        format_quiz_question_tool,
+        calculate_quiz_summary_tool,
+        get_adaptive_quiz_question_tool,
     ]

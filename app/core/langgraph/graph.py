@@ -37,6 +37,7 @@ from app.schemas import (
     GraphState,
     Message,
 )
+from app.schemas.graph import ToolResult
 from app.utils import (
     dump_messages,
     prepare_messages,
@@ -259,8 +260,18 @@ class LangGraphAgent:
             state (GraphState): The current state of the conversation.
 
         Returns:
-            dict: Updated state with new messages.
+            dict: Updated state with new messages and incremented iteration count.
         """
+        # Increment iteration counter for loop protection
+        current_iterations = getattr(state, 'iteration_count', 0) + 1
+        
+        logger.debug(
+            "chat_iteration_started",
+            session_id=state.session_id,
+            iteration_count=current_iterations,
+            max_iterations=getattr(state, 'max_iterations', settings.MAX_GRAPH_ITERATIONS)
+        )
+        
         # Note: RAG enforcement is now handled through tool selection in LLM response
         # The simplified architecture lets the LLM decide when to use RAG tools based on prompts
         
@@ -278,11 +289,15 @@ class LangGraphAgent:
                 # Use the centralized method to get model name
                 model_name = self.get_model_name()
                 with llm_inference_duration_seconds.labels(model=model_name).time():
-                    generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                    generated_state = {
+                        "messages": [await self.llm.ainvoke(dump_messages(messages))],
+                        "iteration_count": current_iterations
+                    }
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
                     llm_calls_num=llm_calls_num + 1,
+                    iteration_count=current_iterations,
                     model=settings.LLM_MODEL,
                     environment=settings.ENVIRONMENT.value,
                 )
@@ -322,9 +337,11 @@ class LangGraphAgent:
             state: The current agent state containing messages and tool calls.
 
         Returns:
-            Dict with updated messages containing tool responses.
+            Dict with updated messages and last tool result.
         """
         outputs = []
+        last_tool_result = None
+        
         for tool_call in state.messages[-1].tool_calls:
             try:
                 # Prepare tool arguments with metadata injection
@@ -388,29 +405,42 @@ class LangGraphAgent:
                         )
 
                 # Execute the tool with enhanced arguments
-                tool_result = await self.tools_by_name[tool_name].ainvoke(tool_args)
+                tool_result_raw = await self.tools_by_name[tool_name].ainvoke(tool_args)
+                
+                # Parse ToolResult if it's JSON, otherwise treat as simple string
+                try:
+                    import json
+                    tool_result_dict = json.loads(tool_result_raw)
+                    parsed_result = ToolResult(**tool_result_dict)
+                    last_tool_result = parsed_result
+                    display_content = parsed_result.content
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    # Legacy tool that returns plain string
+                    display_content = tool_result_raw
+                    last_tool_result = ToolResult(
+                        content=tool_result_raw,
+                        status="complete",
+                        next_action="respond_to_user"
+                    )
+                
                 outputs.append(
                     ToolMessage(
-                        content=tool_result,
+                        content=display_content,
                         name=tool_name,
                         tool_call_id=tool_call["id"],
                     )
                 )
-                logger.debug(
-                    "tool_call_success",
-                    tool_name=tool_name,
-                    session_id=state.session_id,
-                )
+                logger.debug("tool_call_success", tool_name=tool_name, session_id=state.session_id)
             except Exception as e:
-                # Return error as tool message instead of failing the entire conversation
                 error_message = f"Tool execution failed: {str(e)}"
-                logger.error(
-                    "tool_call_failed",
-                    tool_name=tool_call["name"],
-                    error=str(e),
-                    session_id=state.session_id,
-                    exc_info=True,
+                logger.error("tool_call_failed", tool_name=tool_call["name"], error=str(e), session_id=state.session_id)
+                
+                last_tool_result = ToolResult(
+                    content=error_message,
+                    status="error",
+                    next_action="retry_or_handle_error"
                 )
+                
                 outputs.append(
                     ToolMessage(
                         content=error_message,
@@ -419,25 +449,75 @@ class LangGraphAgent:
                         additional_kwargs={"error": True, "error_type": type(e).__name__},
                     )
                 )
-        return {"messages": outputs}
+        return {
+            "messages": outputs,
+            "last_tool_result": last_tool_result
+        }
 
     def _should_continue(self, state: GraphState) -> Literal["end", "continue"]:
-        """Determine if the agent should continue or end based on the last message.
+        """Determine if the agent should continue based on basic checks only.
 
+        The tool lifecycle logic will be handled in _should_continue_after_tools.
+        
         Args:
             state: The current agent state containing messages.
 
         Returns:
-            Literal["end", "continue"]: "end" if there are no tool calls, "continue" otherwise.
+            Literal["end", "continue"]: Decision based on tool calls presence and safety checks.
         """
         messages = state.messages
+        if not messages:
+            return "end"
+            
         last_message = messages[-1]
-        # If there is no function call, then we finish
+        
+        # Check 1: No tool calls - normal termination
         if not last_message.tool_calls:
             return "end"
-        # Otherwise if there is, we continue
-        else:
-            return "continue"
+        
+        # Check 2: Iteration limit reached (safety check)
+        current_iterations = getattr(state, 'iteration_count', 0)
+        max_iterations = getattr(state, 'max_iterations', settings.MAX_GRAPH_ITERATIONS)
+        
+        if current_iterations >= max_iterations:
+            logger.warning(
+                "graph_iteration_limit_reached",
+                session_id=state.session_id,
+                iteration_count=current_iterations,
+                max_iterations=max_iterations
+            )
+            return "end"
+        
+        # If tool calls exist and we haven't hit limits, continue to tool execution
+        return "continue"
+
+    def _should_continue_after_tools(self, state: GraphState) -> Literal["end", "continue"]:
+        """Determine if the agent should continue after tool execution based on tool lifecycle.
+
+        Args:
+            state: The current agent state containing tool results.
+
+        Returns:
+            Literal["end", "continue"]: Decision based on tool lifecycle status.
+        """
+        # Check the result of the last tool execution
+        last_tool_result = getattr(state, 'last_tool_result', None)
+        
+        if last_tool_result:
+            if last_tool_result.status == "complete":
+                logger.info(
+                    "tool_lifecycle_complete",
+                    session_id=state.session_id,
+                    next_action=last_tool_result.next_action
+                )
+                return "end"  # Tool is done, let LLM respond to user
+            elif last_tool_result.status in ["retry", "partial"]:
+                return "continue"  # Tool needs more work
+            elif last_tool_result.status == "error":
+                return "continue"  # Allow retry for errors
+        
+        # Default: end and respond (safety fallback)
+        return "end"
 
     async def create_graph(self) -> Optional[CompiledStateGraph]:
         """Create and configure the LangGraph workflow.
@@ -455,7 +535,11 @@ class LangGraphAgent:
                     self._should_continue,
                     {"continue": "tool_call", "end": END},
                 )
-                graph_builder.add_edge("tool_call", "chat")
+                graph_builder.add_conditional_edges(
+                    "tool_call",
+                    self._should_continue_after_tools,
+                    {"continue": "chat", "end": "chat"},
+                )
                 graph_builder.set_entry_point("chat")
                 graph_builder.set_finish_point("chat")
 
@@ -584,7 +668,16 @@ class LangGraphAgent:
                 ttl=600,  # Cache for 10 minutes (longer cache)
             )
 
-            # Invoke the graph with new messages and subject context
+            # Get current state to preserve loop protection fields
+            current_state = None
+            try:
+                current_state = await sync_to_async(self._graph.get_state)(
+                    config={"configurable": {"thread_id": session_id}}
+                )
+            except Exception as e:
+                logger.warning("failed_to_get_current_state", session_id=session_id, error=str(e))
+
+            # Invoke the graph with new messages and subject context, preserving state
             graph_input = {
                 "messages": dump_messages(messages),
                 "session_id": session_id,
@@ -592,6 +685,10 @@ class LangGraphAgent:
                     **subject_context,
                     "user_id": user_id,  # Ensure user_id is available in state
                 },
+                # Preserve tool lifecycle fields from existing state
+                "iteration_count": current_state.values.get("iteration_count", 0) if current_state and current_state.values else 0,
+                "last_tool_result": current_state.values.get("last_tool_result") if current_state and current_state.values else None,
+                "max_iterations": current_state.values.get("max_iterations", settings.MAX_GRAPH_ITERATIONS) if current_state and current_state.values else settings.MAX_GRAPH_ITERATIONS,
             }
             response = await self._graph.ainvoke(graph_input, config)
 
@@ -650,7 +747,7 @@ class LangGraphAgent:
             seen_tool_calls = False
             tool_execution_complete = False
             
-            async for token, metadata in self._graph.astream(
+            async for token, _metadata in self._graph.astream(
                 {
                     "messages": dump_messages(messages),
                     "session_id": session_id,

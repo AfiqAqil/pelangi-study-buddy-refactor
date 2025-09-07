@@ -28,6 +28,7 @@ from app.core.logging import logger
 from app.core.metrics import setup_metrics
 from app.core.middleware import MetricsMiddleware
 from app.core.chatwoot_middleware import ChatwootWebhookMiddleware
+from app.core.quota_middleware import QuotaMiddleware
 from app.services.database import database_service
 from app.services.redis import redis_service
 from app.services.chatwoot import chatwoot_service
@@ -162,6 +163,9 @@ setup_metrics(app)
 
 # Add custom metrics middleware
 app.add_middleware(MetricsMiddleware)
+
+# Add quota middleware for tier-based limitations
+app.add_middleware(QuotaMiddleware)
 
 # Add Chatwoot webhook middleware
 if settings.CHATWOOT_ENABLED:
