@@ -1,6 +1,7 @@
-"""Database models for the application."""
+"""Models package for the application."""
 
 # Import all models to ensure they are registered with SQLModel
+from app.models.base import BaseModel
 from app.models.user import User, UserTier
 from app.models.session import Session
 from app.models.thread import Thread
@@ -16,6 +17,7 @@ from app.models.daily_quota import TierQuotaConfig, DailyQuizQuota, DailyUserQuo
 from app.models.payment_link import PaymentLink
 
 __all__ = [
+    "BaseModel",
     "User",
     "UserTier", 
     "Session",
