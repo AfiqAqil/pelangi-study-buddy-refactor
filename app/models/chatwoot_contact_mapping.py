@@ -1,7 +1,6 @@
 """Chatwoot contact to phone number mapping model."""
 
-from typing import Optional
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field
 
 from app.models.base import BaseModel
 

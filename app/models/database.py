@@ -17,7 +17,7 @@ from app.models.payment_link import PaymentLink
 
 __all__ = [
     "User",
-    "UserTier", 
+    "UserTier",
     "Session",
     "Thread",
     "ChatwootContactMapping",

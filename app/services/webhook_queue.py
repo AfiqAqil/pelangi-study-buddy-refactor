@@ -2,14 +2,13 @@
 
 import json
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
 from app.services.redis import redis_service
 from app.core.logging import logger
 from app.core.metrics import (
     chatwoot_webhooks_total,
-    chatwoot_message_processing_duration_seconds,
 )
 
 

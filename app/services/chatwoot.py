@@ -72,12 +72,12 @@ class ChatwootService:
 
     def _get_connection_pool_config(self) -> dict:
         """Get environment-specific connection pool configuration.
-        
+
         Returns:
             Dict with connection pool settings
         """
         from app.core.config import Environment
-        
+
         if settings.ENVIRONMENT == Environment.PRODUCTION:
             return {
                 "limit": 200,  # High concurrency for production
@@ -105,13 +105,9 @@ class ChatwootService:
         if self.session is None or self.session.closed:
             # Get environment-specific connection pool config
             pool_config = self._get_connection_pool_config()
-            
-            logger.info(
-                "chatwoot_connection_pool_config",
-                environment=settings.ENVIRONMENT.value,
-                **pool_config
-            )
-            
+
+            logger.info("chatwoot_connection_pool_config", environment=settings.ENVIRONMENT.value, **pool_config)
+
             # Create connector with environment-aware connection pooling
             self.connector = aiohttp.TCPConnector(
                 limit=pool_config["limit"],
@@ -180,7 +176,7 @@ class ChatwootService:
         """
         # Get circuit breaker for API calls
         circuit_breaker = await self._get_circuit_breaker()
-        
+
         async def _execute_request():
             """Execute the actual request - used by circuit breaker."""
             url = f"{self.base_url}/api/v1/accounts/{self.account_id}/{endpoint}"
@@ -196,7 +192,9 @@ class ChatwootService:
                         if response.status == 200 or response.status == 201:
                             # Track successful API request metrics
                             duration = time.time() - request_start_time
-                            chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="success").inc()
+                            chatwoot_api_requests_total.labels(
+                                endpoint=endpoint, method=method, status="success"
+                            ).inc()
                             chatwoot_api_request_duration_seconds.labels(endpoint=endpoint, method=method).observe(
                                 duration
                             )
@@ -226,7 +224,11 @@ class ChatwootService:
 
                 except ClientError as e:
                     logger.error(
-                        "chatwoot_api_client_error", method=method, endpoint=endpoint, error=str(e), attempt=attempt + 1
+                        "chatwoot_api_client_error",
+                        method=method,
+                        endpoint=endpoint,
+                        error=str(e),
+                        attempt=attempt + 1,
                     )
 
                     # If this is the last attempt, raise the error
@@ -264,7 +266,7 @@ class ChatwootService:
                 "chatwoot_circuit_open",
                 method=method,
                 endpoint=endpoint,
-                message="Circuit breaker is open, falling back"
+                message="Circuit breaker is open, falling back",
             )
             # Track circuit breaker metrics
             chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="circuit_open").inc()

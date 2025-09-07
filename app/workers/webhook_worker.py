@@ -3,7 +3,6 @@
 import asyncio
 import time
 from typing import Dict, Any, Optional
-from contextlib import asynccontextmanager
 
 from app.services.webhook_queue import webhook_queue_service
 from app.services.chatwoot import chatwoot_service
@@ -185,7 +184,6 @@ class WebhookWorker:
 
         # Use simplified phone-based user identification
         from app.services.user_identification import user_identification_service
-        from app.services.chatwoot import chatwoot_service
 
         # Check if we need to request phone number from user
         if user_identification_service.requires_phone_number(sender):
@@ -203,7 +201,7 @@ class WebhookWorker:
 
                 # Store the phone number mapping for future messages
                 mapping_stored = user_identification_service.store_contact_phone_mapping(sender.id, extracted_phone)
-                
+
                 if not mapping_stored:
                     logger.error(
                         "webhook_worker_invalid_phone_extracted",

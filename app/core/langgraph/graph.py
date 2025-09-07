@@ -2,9 +2,7 @@
 
 import asyncio
 from typing import (
-    Any,
     AsyncGenerator,
-    Dict,
     Literal,
     Optional,
 )
@@ -66,14 +64,16 @@ class LangGraphAgent:
         """Cleanup resources when the agent is destroyed."""
         # Note: This is a safety net. Proper cleanup should use close_connection_pool()
         if self._connection_pool:
-            logger.warning("connection_pool_not_closed_properly", 
-                         message="Connection pool was not closed properly. Use close_connection_pool()")
+            logger.warning(
+                "connection_pool_not_closed_properly",
+                message="Connection pool was not closed properly. Use close_connection_pool()",
+            )
             # Can't await in destructor, so just set to None
             self._connection_pool = None
 
     def get_model_name(self) -> str:
         """Get the model name from the LLM provider.
-        
+
         Returns:
             str: The model name, handling different provider attribute names
         """
@@ -82,10 +82,10 @@ class LangGraphAgent:
 
     async def get_message_count_async(self, session_id: str) -> int:
         """Get message count using native async query.
-        
+
         Args:
             session_id: Session ID to count messages for
-            
+
         Returns:
             int: Number of messages for the session
         """
@@ -93,7 +93,7 @@ class LangGraphAgent:
         if not connection_pool:
             logger.warning("no_connection_pool_for_message_count", session_id=session_id)
             return 0
-            
+
         try:
             async with connection_pool.connection() as conn:
                 # Query the LangGraph checkpoint tables directly
@@ -105,17 +105,12 @@ class LangGraphAgent:
                     WHERE thread_id = $1 
                     AND channel = 'messages'
                     """,
-                    session_id
+                    session_id,
                 )
                 return result or 0
         except Exception as e:
-            logger.error(
-                "async_message_count_failed", 
-                session_id=session_id, 
-                error=str(e)
-            )
+            logger.error("async_message_count_failed", session_id=session_id, error=str(e))
             return 0
-
 
     async def _get_connection_pool(self) -> AsyncConnectionPool:
         """Get a PostgreSQL connection pool using environment-specific settings.
@@ -245,18 +240,37 @@ class LangGraphAgent:
         outputs = []
         for tool_call in state.messages[-1].tool_calls:
             try:
-                # Execute the tool with error handling
-                tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+                # Prepare tool arguments with metadata injection
+                tool_args = tool_call["args"].copy()
+
+                # Inject user_id for tools that require it
+                tool_name = tool_call["name"]
+                if tool_name in ["select_subject", "get_subject_context"]:
+                    # Get user_id from state metadata
+                    user_id = state.metadata.get("user_id") if state.metadata else None
+                    if user_id:
+                        tool_args["user_id"] = user_id
+                        logger.debug(
+                            "injected_user_id_to_tool",
+                            tool_name=tool_name,
+                            user_id=user_id,
+                            session_id=state.session_id,
+                        )
+                    else:
+                        logger.warning("missing_user_id_for_tool", tool_name=tool_name, session_id=state.session_id)
+
+                # Execute the tool with enhanced arguments
+                tool_result = await self.tools_by_name[tool_name].ainvoke(tool_args)
                 outputs.append(
                     ToolMessage(
                         content=tool_result,
-                        name=tool_call["name"],
+                        name=tool_name,
                         tool_call_id=tool_call["id"],
                     )
                 )
                 logger.debug(
                     "tool_call_success",
-                    tool_name=tool_call["name"],
+                    tool_name=tool_name,
                     session_id=state.session_id,
                 )
             except Exception as e:
@@ -381,6 +395,25 @@ class LangGraphAgent:
         """
         if self._graph is None:
             self._graph = await self.create_graph()
+
+        # Get subject context for the user if available
+        subject_context = {}
+        if user_id:
+            try:
+                from app.services.subject_service import subject_service
+
+                current_subject = await subject_service.get_user_current_subject(user_id)
+                if current_subject:
+                    subject_context = {
+                        "current_subject": current_subject["name"],
+                        "subject_id": current_subject["id"],
+                        "book_code": current_subject.get("book_code"),
+                        "description": current_subject.get("description"),
+                    }
+                    logger.debug("subject_context_added", user_id=user_id, subject=current_subject["name"])
+            except Exception as e:
+                logger.warning("failed_to_get_subject_context", user_id=user_id, error=str(e))
+
         config = {
             "configurable": {"thread_id": session_id},
             "callbacks": [CallbackHandler()],
@@ -389,6 +422,7 @@ class LangGraphAgent:
                 "session_id": session_id,
                 "environment": settings.ENVIRONMENT.value,
                 "debug": False,
+                "subject_context": subject_context,
             },
         }
         try:
@@ -422,10 +456,16 @@ class LangGraphAgent:
                 ttl=600,  # Cache for 10 minutes (longer cache)
             )
 
-            # Invoke the graph with new messages
-            response = await self._graph.ainvoke(
-                {"messages": dump_messages(messages), "session_id": session_id}, config
-            )
+            # Invoke the graph with new messages and subject context
+            graph_input = {
+                "messages": dump_messages(messages),
+                "session_id": session_id,
+                "metadata": {
+                    **subject_context,
+                    "user_id": user_id,  # Ensure user_id is available in state
+                },
+            }
+            response = await self._graph.ainvoke(graph_input, config)
 
             # Process all messages
             all_messages = self.__process_messages(response["messages"])
@@ -480,7 +520,13 @@ class LangGraphAgent:
 
         try:
             async for token, _ in self._graph.astream(
-                {"messages": dump_messages(messages), "session_id": session_id}, config, stream_mode="messages"
+                {
+                    "messages": dump_messages(messages),
+                    "session_id": session_id,
+                    "metadata": {"user_id": user_id},  # Include user_id for tool calls
+                },
+                config,
+                stream_mode="messages",
             ):
                 try:
                     yield token.content
@@ -507,10 +553,8 @@ class LangGraphAgent:
         # Use async timeout to prevent hanging
         try:
             state: StateSnapshot = await asyncio.wait_for(
-                sync_to_async(self._graph.get_state)(
-                    config={"configurable": {"thread_id": session_id}}
-                ),
-                timeout=5.0  # 5 second timeout for history retrieval
+                sync_to_async(self._graph.get_state)(config={"configurable": {"thread_id": session_id}}),
+                timeout=5.0,  # 5 second timeout for history retrieval
             )
         except asyncio.TimeoutError:
             logger.warning("chat_history_timeout", session_id=session_id)

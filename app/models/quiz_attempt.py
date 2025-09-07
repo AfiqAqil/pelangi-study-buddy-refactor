@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 class QuizAttempt(BaseModel, table=True):
     """QuizAttempt model for tracking user attempts at quiz questions.
-    
+
     Attributes:
         id: The primary key (UUID)
         user_id: Foreign key to users table
@@ -24,15 +24,15 @@ class QuizAttempt(BaseModel, table=True):
         is_correct: Whether the answer was correct
         time_taken_seconds: Time taken to answer (optional)
         created_at: When the attempt was created
-        
+
         # Relationships
         user: Relationship to User model
         question: Relationship to QuestionsBank model
         session: Relationship to ChatSession model
     """
-    
+
     __tablename__ = "quiz_attempts"
-    
+
     id: str = Field(default=None, primary_key=True)
     user_id: str = Field(foreign_key="users.id", index=True)
     question_id: str = Field(foreign_key="questions_bank.id", index=True)
@@ -40,11 +40,11 @@ class QuizAttempt(BaseModel, table=True):
     user_answer: str = Field(description="The answer provided by the user")
     is_correct: bool = Field(index=True, description="Whether the answer was correct")
     time_taken_seconds: Optional[int] = Field(default=None, description="Time taken to answer")
-    
+
     # Relationships
     user: "User" = Relationship(back_populates="quiz_attempts")
     question: "QuestionsBank" = Relationship(back_populates="quiz_attempts")
     session: "ChatSession" = Relationship(back_populates="quiz_attempts")
-    
+
     # Note: CheckConstraint with subquery not supported in PostgreSQL
     # Business logic should ensure quiz_attempts only reference quiz-type questions

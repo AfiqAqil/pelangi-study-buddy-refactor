@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 class QuestionsBank(BaseModel, table=True):
     """QuestionsBank model for storing quiz questions with rich metadata.
-    
+
     Attributes:
         id: The primary key (UUID)
         question: The question text
@@ -38,25 +38,31 @@ class QuestionsBank(BaseModel, table=True):
         knowledge_snippet_type: Type of knowledge snippet
         image_uri: URI for associated image
         created_at: When the question was created
-        
+
         # Relationships
         quiz_attempts: Relationship to quiz attempts for this question
     """
-    
+
     __tablename__ = "questions_bank"
-    
+
     id: str = Field(default=None, primary_key=True)
     question: str = Field(description="The question text")
     answer: str = Field(description="The correct answer")
     type: str = Field(index=True, description="Question type (e.g., 'exam' or 'quiz')")
-    forms: Optional[List[int]] = Field(default=None, sa_column=Column(sa.ARRAY(sa.Integer)), description="List of form [1,2,3] or [4,5]")
+    forms: Optional[List[int]] = Field(
+        default=None, sa_column=Column(sa.ARRAY(sa.Integer)), description="List of form [1,2,3] or [4,5]"
+    )
     subject: str = Field(index=True, description="Subject area (e.g., 'math', 'science')")
     language: str = Field(index=True, description="Language ('english', 'malay', 'chinese')")
     difficulty_level: str = Field(index=True, description="Difficulty level ('easy', 'moderate', 'hard')")
-    blooms_level: Optional[str] = Field(default=None, index=True, description="Bloom's taxonomy level ('tp1', 'tp2', 'tp3', 'tp4')")
+    blooms_level: Optional[str] = Field(
+        default=None, index=True, description="Bloom's taxonomy level ('tp1', 'tp2', 'tp3', 'tp4')"
+    )
     blooms_descriptor: Optional[str] = Field(default=None, description="Bloom's taxonomy descriptor")
     question_type: Optional[str] = Field(default=None, description="Type of question format")
-    learning_standards: Optional[List[str]] = Field(default=None, sa_column=Column(sa.ARRAY(sa.Text)), description="Learning standards covered")
+    learning_standards: Optional[List[str]] = Field(
+        default=None, sa_column=Column(sa.ARRAY(sa.Text)), description="Learning standards covered"
+    )
     answer_page: Optional[int] = Field(default=None, description="Page number where answer can be found")
     chapter_number: Optional[str] = Field(default=None, index=True, description="Chapter number (1-27)")
     chapter_name: Optional[str] = Field(default=None, index=True, description="Chapter name")
@@ -67,6 +73,6 @@ class QuestionsBank(BaseModel, table=True):
     knowledge_snippet: Optional[str] = Field(default=None, description="Knowledge snippet for context")
     knowledge_snippet_type: Optional[str] = Field(default=None, description="Type of knowledge snippet")
     image_uri: Optional[str] = Field(default=None, description="URI for associated image")
-    
+
     # Relationships
     quiz_attempts: List["QuizAttempt"] = Relationship(back_populates="question")

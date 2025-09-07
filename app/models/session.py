@@ -2,7 +2,6 @@
 
 from typing import (
     TYPE_CHECKING,
-    List,
 )
 
 from sqlmodel import (

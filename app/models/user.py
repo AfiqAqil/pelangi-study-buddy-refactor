@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 class UserTier(str, Enum):
     """User tier enumeration for subscription levels."""
+
     FREE = "FREE"
     PREMIUM = "PREMIUM"
     ENTERPRISE = "ENTERPRISE"
@@ -48,7 +49,7 @@ class User(BaseModel, table=True):
         hashed_password: Bcrypt hashed password
         created_at: When the user was created
         updated_at: When the user was last updated
-        
+
         # Onboarding and profile fields
         full_name: User's full name
         date_of_birth: User's date of birth
@@ -60,12 +61,12 @@ class User(BaseModel, table=True):
         language: Preferred language (English, Bahasa Malaysia, Chinese)
         student_id: Optional student ID
         onboarding_completed: Whether onboarding is complete
-        
+
         # Chatwoot-specific fields
         chatwoot_user_id: Chatwoot's user ID
         chatwoot_contact_id: Chatwoot's contact ID
         chatwoot_account_id: Chatwoot account ID
-        
+
         # Relationships
         sessions: Relationship to user's chat sessions
         chat_sessions: Relationship to user's enhanced chat sessions
@@ -81,15 +82,17 @@ class User(BaseModel, table=True):
     external_id: str = Field(unique=True, index=True)
     channel: str = Field(index=True)  # 'web' or 'whatsapp'
     tier: UserTier = Field(default=UserTier.FREE, index=True)
-    
+
     # Authentication fields
     email: Optional[str] = Field(default=None, unique=True, index=True)
     phone: Optional[str] = Field(default=None, unique=True, index=True)
     hashed_password: Optional[str] = Field(default=None)
-    
+
     # Audit fields
-    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(sa.DateTime(timezone=True), onupdate=sa.func.now()))
-    
+    updated_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(sa.DateTime(timezone=True), onupdate=sa.func.now())
+    )
+
     # Onboarding and profile fields
     full_name: Optional[str] = Field(default=None)
     date_of_birth: Optional[date] = Field(default=None)
@@ -101,12 +104,12 @@ class User(BaseModel, table=True):
     language: str = Field(default="English")  # "English", "Bahasa Malaysia", "Chinese"
     student_id: Optional[str] = Field(default=None)
     onboarding_completed: bool = Field(default=False)
-    
+
     # Chatwoot-specific fields
     chatwoot_user_id: Optional[int] = Field(default=None, unique=True)
     chatwoot_contact_id: Optional[int] = Field(default=None)
     chatwoot_account_id: Optional[int] = Field(default=None)
-    
+
     # Relationships
     sessions: List["Session"] = Relationship(back_populates="user")
     chat_sessions: List["ChatSession"] = Relationship(back_populates="user")
@@ -136,7 +139,7 @@ class User(BaseModel, table=True):
 
         # Handle different Malaysian phone number formats
         if digits.startswith("60") and len(digits) >= 11:
-            # Already has country code - ensure it's 60 + 9-10 digits  
+            # Already has country code - ensure it's 60 + 9-10 digits
             if len(digits) >= 11 and len(digits) <= 12:
                 return f"+{digits}"
         elif digits.startswith("0") and len(digits) >= 10:
