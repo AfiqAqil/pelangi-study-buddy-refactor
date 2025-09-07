@@ -74,10 +74,9 @@ async def get_current_user(
             )
 
         # Verify user exists in database
-        user_id_int = int(user_id)
-        user = await db_service.get_user(user_id_int)
+        user = await db_service.get_user(user_id)
         if user is None:
-            logger.error("user_not_found", user_id=user_id_int)
+            logger.error("user_not_found", user_id=user_id)
             raise HTTPException(
                 status_code=404,
                 detail="User not found",
@@ -168,13 +167,32 @@ async def register_user(request: Request, user_data: UserCreate):
         if await db_service.get_user_by_email(sanitized_email):
             raise HTTPException(status_code=400, detail="Email already registered")
 
+        # Normalize phone if provided
+        normalized_phone = None
+        if user_data.phone:
+            normalized_phone = User.normalize_phone(user_data.phone)
+            if not User.is_valid_malaysian_phone(user_data.phone):
+                raise HTTPException(status_code=400, detail="Invalid Malaysian phone number format")
+        
         # Create user
-        user = await db_service.create_user(email=sanitized_email, password=User.hash_password(password))
+        user = await db_service.create_user(
+            email=sanitized_email, 
+            password=User.hash_password(password),
+            phone=normalized_phone,
+            channel=user_data.channel
+        )
 
         # Create access token
         token = create_access_token(str(user.id))
 
-        return UserResponse(id=user.id, email=user.email, token=token)
+        return UserResponse(
+            id=user.id, 
+            external_id=user.external_id,
+            email=user.email, 
+            channel=user.channel,
+            tier=user.tier.value,
+            token=token
+        )
     except ValueError as ve:
         logger.error("user_registration_validation_failed", error=str(ve), exc_info=True)
         raise HTTPException(status_code=422, detail=str(ve))

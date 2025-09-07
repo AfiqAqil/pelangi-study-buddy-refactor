@@ -46,10 +46,14 @@ class UserCreate(BaseModel):
     Attributes:
         email: User's email address
         password: User's password
+        phone: User's phone number (optional)
+        channel: Registration channel (defaults to 'web')
     """
 
     email: EmailStr = Field(..., description="User's email address")
     password: SecretStr = Field(..., description="User's password", min_length=8, max_length=64)
+    phone: str | None = Field(None, description="User's phone number (Malaysian +60 format)")
+    channel: str = Field(default="web", description="Registration channel ('web' or 'whatsapp')")
 
     @field_validator("password")
     @classmethod
@@ -90,13 +94,19 @@ class UserResponse(BaseModel):
     """Response model for user operations.
 
     Attributes:
-        id: User's ID
+        id: User's ID (string UUID)
+        external_id: External user identifier
         email: User's email address
+        channel: User's registration channel
+        tier: User's tier level
         token: Authentication token
     """
 
-    id: int = Field(..., description="User's ID")
-    email: str = Field(..., description="User's email address")
+    id: str = Field(..., description="User's ID (string UUID)")
+    external_id: str = Field(..., description="External user identifier")
+    email: str | None = Field(None, description="User's email address")
+    channel: str = Field(..., description="User's registration channel")
+    tier: str = Field(..., description="User's tier level")
     token: Token = Field(..., description="Authentication token")
 
 

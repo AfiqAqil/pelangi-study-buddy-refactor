@@ -6,9 +6,7 @@ from alembic import context
 from sqlmodel import SQLModel
 
 # Import your models here for autogenerate support
-from app.models.user import User
-from app.models.session import Session
-from app.models.chatwoot_contact_mapping import ChatwootContactMapping
+from app.models.database import *  # Import all models to ensure registration
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -64,29 +64,43 @@ class DatabaseService:
             if settings.ENVIRONMENT != Environment.PRODUCTION:
                 raise
 
-    async def create_user(self, email: str, password: str) -> User:
+    async def create_user(self, email: str, password: str, phone: Optional[str] = None, channel: str = "web") -> User:
         """Create a new user.
 
         Args:
             email: User's email address
             password: Hashed password
+            phone: User's phone number (optional)
+            channel: Registration channel ('web' or 'whatsapp')
 
         Returns:
             User: The created user
         """
+        import uuid
+        
         with Session(self.engine) as session:
-            user = User(email=email, hashed_password=password)
+            # Generate external_id (required field)
+            external_id = f"{channel}_{uuid.uuid4().hex[:12]}"
+            
+            user = User(
+                email=email, 
+                hashed_password=password,
+                phone=phone,
+                external_id=external_id,
+                channel=channel,
+                tier="FREE"  # Default tier
+            )
             session.add(user)
             session.commit()
             session.refresh(user)
-            logger.info("user_created", email=email)
+            logger.info("user_created", email=email, external_id=external_id, channel=channel)
             return user
 
-    async def get_user(self, user_id: int) -> Optional[User]:
+    async def get_user(self, user_id: str) -> Optional[User]:
         """Get a user by ID.
 
         Args:
-            user_id: The ID of the user to retrieve
+            user_id: The ID of the user to retrieve (string UUID)
 
         Returns:
             Optional[User]: The user if found, None otherwise
@@ -128,7 +142,7 @@ class DatabaseService:
             logger.info("user_deleted", email=email)
             return True
 
-    async def create_session(self, session_id: str, user_id: int, name: str = "") -> ChatSession:
+    async def create_session(self, session_id: str, user_id: str, name: str = "") -> ChatSession:
         """Create a new chat session.
 
         Args:
@@ -179,7 +193,7 @@ class DatabaseService:
             chat_session = session.get(ChatSession, session_id)
             return chat_session
 
-    async def get_user_sessions(self, user_id: int) -> List[ChatSession]:
+    async def get_user_sessions(self, user_id: str) -> List[ChatSession]:
         """Get all sessions for a user.
 
         Args:

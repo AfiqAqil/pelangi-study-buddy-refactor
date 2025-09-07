@@ -65,11 +65,19 @@ class UserIdentificationService:
         hashed_password = User.hash_password(temp_password)
 
         try:
+            import uuid
+            
+            # Generate external_id for WhatsApp users
+            external_id = f"whatsapp_{uuid.uuid4().hex[:12]}"
+            
             with Session(self.db_service.engine) as session:
                 new_user = User(
                     email=email,
                     phone=normalized_phone,
                     hashed_password=hashed_password,
+                    external_id=external_id,
+                    channel="whatsapp",
+                    tier="FREE"  # Default tier
                 )
 
                 session.add(new_user)
@@ -105,7 +113,7 @@ class UserIdentificationService:
         # Create new user with available information
         return self.create_user_with_phone(phone=contact.phone, email=contact.email, name=contact.name)
 
-    def get_user_session_id(self, user_id: int, conversation_id: int) -> str:
+    def get_user_session_id(self, user_id: str, conversation_id: int) -> str:
         """Generate session ID for user and conversation.
 
         Args:
