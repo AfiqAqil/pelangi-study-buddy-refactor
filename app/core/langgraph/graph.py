@@ -43,6 +43,7 @@ from app.schemas import (
 from app.utils import (
     dump_messages,
     prepare_messages,
+    trim_messages_by_count,
 )
 
 
@@ -443,7 +444,7 @@ class LangGraphAgent:
             session_id (str): The session ID for the conversation.
 
         Returns:
-            list[Message]: The chat history.
+            list[Message]: The chat history with context window applied.
         """
         if self._graph is None:
             self._graph = await self.create_graph()
@@ -451,7 +452,15 @@ class LangGraphAgent:
         state: StateSnapshot = await sync_to_async(self._graph.get_state)(
             config={"configurable": {"thread_id": session_id}}
         )
-        return self.__process_messages(state.values["messages"]) if state.values else []
+        
+        if not state.values:
+            return []
+            
+        # Get all messages and apply context window
+        all_messages = self.__process_messages(state.values["messages"])
+        windowed_messages = trim_messages_by_count(all_messages, settings.CONTEXT_WINDOW_SIZE)
+        
+        return windowed_messages
 
     def __process_messages(self, messages: list[BaseMessage]) -> list[Message]:
         openai_style_messages = convert_to_openai_messages(messages)

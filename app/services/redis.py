@@ -281,6 +281,51 @@ class RedisService:
         key = f"message_count:{session_id}"
         return await self.delete(key)
 
+    async def get_windowed_message_count(self, session_id: str, context_window_size: int) -> Optional[int]:
+        """Get cached windowed message count for a session.
+
+        Args:
+            session_id: Session identifier
+            context_window_size: Size of the context window
+
+        Returns:
+            Windowed message count or None if not cached
+        """
+        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        count = await self.get(key)
+        return int(count) if count is not None else None
+
+    async def set_windowed_message_count(
+        self, session_id: str, context_window_size: int, count: int, ttl: Optional[int] = None
+    ) -> bool:
+        """Cache windowed message count for a session.
+
+        Args:
+            session_id: Session identifier
+            context_window_size: Size of the context window
+            count: Windowed message count to cache
+            ttl: Time to live in seconds
+
+        Returns:
+            True if successful
+        """
+        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        ttl = ttl or settings.CACHE_MESSAGE_COUNT_TTL
+        return await self.set(key, count, ttl)
+
+    async def invalidate_windowed_message_count(self, session_id: str, context_window_size: int) -> bool:
+        """Invalidate cached windowed message count for a session.
+
+        Args:
+            session_id: Session identifier
+            context_window_size: Size of the context window
+
+        Returns:
+            True if deleted
+        """
+        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        return await self.delete(key)
+
     async def cache_conversation_info(
         self, conversation_id: int, info: Dict[str, Any], ttl: Optional[int] = None
     ) -> bool:

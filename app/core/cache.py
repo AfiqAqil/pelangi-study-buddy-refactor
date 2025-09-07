@@ -195,6 +195,49 @@ class ConversationCache:
 
         return count or 0
 
+    @staticmethod
+    async def get_or_set_windowed_message_count(
+        session_id: str, context_window_size: int, fetch_func: Callable, ttl: Optional[int] = None
+    ) -> int:
+        """Get windowed message count from cache or fetch and cache it.
+
+        Args:
+            session_id: Session identifier
+            context_window_size: Size of the context window
+            fetch_func: Async function to fetch the count if not cached
+            ttl: Time to live for cache entry
+
+        Returns:
+            Windowed message count
+        """
+        # Try cache first
+        cached_count = await redis_service.get_windowed_message_count(session_id, context_window_size)
+        if cached_count is not None:
+            logger.debug(
+                "windowed_message_count_cache_hit",
+                session_id=session_id,
+                context_window_size=context_window_size,
+                count=cached_count,
+            )
+            return cached_count
+
+        # Cache miss - fetch and cache
+        logger.debug(
+            "windowed_message_count_cache_miss", session_id=session_id, context_window_size=context_window_size
+        )
+        count = await fetch_func()
+
+        if count is not None:
+            await redis_service.set_windowed_message_count(session_id, context_window_size, count, ttl)
+            logger.debug(
+                "windowed_message_count_cached",
+                session_id=session_id,
+                context_window_size=context_window_size,
+                count=count,
+            )
+
+        return count or 0
+
 
 # Cache decorators for common patterns
 def cache_message_count(ttl: Optional[int] = None):
