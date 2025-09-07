@@ -70,17 +70,56 @@ class ChatwootService:
             )
         return self.circuit_breaker
 
+    def _get_connection_pool_config(self) -> dict:
+        """Get environment-specific connection pool configuration.
+        
+        Returns:
+            Dict with connection pool settings
+        """
+        from app.core.config import Environment
+        
+        if settings.ENVIRONMENT == Environment.PRODUCTION:
+            return {
+                "limit": 200,  # High concurrency for production
+                "limit_per_host": 50,
+                "keepalive_timeout": 180,
+                "ttl_dns_cache": 300,  # 5 minutes
+            }
+        elif settings.ENVIRONMENT == Environment.STAGING:
+            return {
+                "limit": 100,  # Medium concurrency for staging
+                "limit_per_host": 30,
+                "keepalive_timeout": 120,
+                "ttl_dns_cache": 300,
+            }
+        else:  # Development/Test
+            return {
+                "limit": 20,  # Lower limits for development
+                "limit_per_host": 10,
+                "keepalive_timeout": 60,
+                "ttl_dns_cache": 60,  # Faster DNS refresh in dev
+            }
+
     async def _get_session(self):
         """Get or create HTTP session with connection pooling."""
         if self.session is None or self.session.closed:
-            # Create connector with optimized connection pooling for performance
+            # Get environment-specific connection pool config
+            pool_config = self._get_connection_pool_config()
+            
+            logger.info(
+                "chatwoot_connection_pool_config",
+                environment=settings.ENVIRONMENT.value,
+                **pool_config
+            )
+            
+            # Create connector with environment-aware connection pooling
             self.connector = aiohttp.TCPConnector(
-                limit=100,  # Increased total pool size for better concurrency
-                limit_per_host=30,  # Increased per-host limit for more parallel requests
-                keepalive_timeout=120,  # Increased keepalive for better connection reuse
+                limit=pool_config["limit"],
+                limit_per_host=pool_config["limit_per_host"],
+                keepalive_timeout=pool_config["keepalive_timeout"],
                 enable_cleanup_closed=True,  # Clean up closed connections
                 use_dns_cache=True,  # Cache DNS lookups
-                ttl_dns_cache=600,  # Longer DNS cache TTL for performance
+                ttl_dns_cache=pool_config["ttl_dns_cache"],
                 family=0,  # Use both IPv4 and IPv6
                 force_close=False,  # Reuse connections more aggressively
             )
@@ -125,7 +164,7 @@ class ChatwootService:
         data: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Make an HTTP request to the Chatwoot API with retry logic.
+        """Make an HTTP request to the Chatwoot API with circuit breaker and retry logic.
 
         Args:
             method: HTTP method (GET, POST, PATCH, etc.)
@@ -139,80 +178,97 @@ class ChatwootService:
         Raises:
             ChatwootServiceError: If the API request fails after retries
         """
-        url = f"{self.base_url}/api/v1/accounts/{self.account_id}/{endpoint}"
+        # Get circuit breaker for API calls
+        circuit_breaker = await self._get_circuit_breaker()
+        
+        async def _execute_request():
+            """Execute the actual request - used by circuit breaker."""
+            url = f"{self.base_url}/api/v1/accounts/{self.account_id}/{endpoint}"
+            request_start_time = time.time()
 
-        # Track request start time for metrics
-        request_start_time = time.time()
+            for attempt in range(self.max_retries):
+                try:
+                    # Use pooled session instead of creating new one each time
+                    session = await self._get_session()
+                    async with session.request(method=method, url=url, json=data, params=params) as response:
+                        response_data = await response.json()
 
-        for attempt in range(self.max_retries):
-            try:
-                # Use pooled session instead of creating new one each time
-                session = await self._get_session()
-                async with session.request(method=method, url=url, json=data, params=params) as response:
-                    response_data = await response.json()
-
-                    if response.status == 200 or response.status == 201:
-                        # Track successful API request metrics
-                        duration = time.time() - request_start_time
-                        chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="success").inc()
-                        chatwoot_api_request_duration_seconds.labels(endpoint=endpoint, method=method).observe(
-                            duration
-                        )
-
-                        logger.debug(
-                            "chatwoot_api_success",
-                            method=method,
-                            endpoint=endpoint,
-                            status=response.status,
-                        )
-                        return response_data
-                    else:
-                        logger.warning(
-                            "chatwoot_api_error",
-                            method=method,
-                            endpoint=endpoint,
-                            status=response.status,
-                            response=response_data,
-                            attempt=attempt + 1,
-                        )
-
-                        # Don't retry for client errors (4xx) - fail fast
-                        if 400 <= response.status < 500:
-                            raise ChatwootServiceError(
-                                f"Chatwoot API client error: {response.status} - {response_data}"
+                        if response.status == 200 or response.status == 201:
+                            # Track successful API request metrics
+                            duration = time.time() - request_start_time
+                            chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="success").inc()
+                            chatwoot_api_request_duration_seconds.labels(endpoint=endpoint, method=method).observe(
+                                duration
                             )
 
-            except ClientError as e:
-                logger.error(
-                    "chatwoot_api_client_error", method=method, endpoint=endpoint, error=str(e), attempt=attempt + 1
-                )
+                            logger.debug(
+                                "chatwoot_api_success",
+                                method=method,
+                                endpoint=endpoint,
+                                status=response.status,
+                            )
+                            return response_data
+                        else:
+                            logger.warning(
+                                "chatwoot_api_error",
+                                method=method,
+                                endpoint=endpoint,
+                                status=response.status,
+                                response=response_data,
+                                attempt=attempt + 1,
+                            )
 
-                # If this is the last attempt, raise the error
-                if attempt == self.max_retries - 1:
-                    raise ChatwootServiceError(f"Chatwoot API request failed: {str(e)}")
+                            # Don't retry for client errors (4xx) - fail fast
+                            if 400 <= response.status < 500:
+                                raise ChatwootServiceError(
+                                    f"Chatwoot API client error: {response.status} - {response_data}"
+                                )
 
-                # Fixed minimal backoff for faster recovery
-                await asyncio.sleep(0.5)  # Fixed 0.5s delay between retries
+                except ClientError as e:
+                    logger.error(
+                        "chatwoot_api_client_error", method=method, endpoint=endpoint, error=str(e), attempt=attempt + 1
+                    )
 
-            except Exception as e:
-                logger.error(
-                    "chatwoot_api_unexpected_error",
-                    method=method,
-                    endpoint=endpoint,
-                    error=str(e),
-                    attempt=attempt + 1,
-                )
+                    # If this is the last attempt, raise the error
+                    if attempt == self.max_retries - 1:
+                        raise ChatwootServiceError(f"Chatwoot API request failed: {str(e)}")
 
-                if attempt == self.max_retries - 1:
-                    raise ChatwootServiceError(f"Unexpected error in Chatwoot API: {str(e)}")
+                    # Fixed minimal backoff for faster recovery
+                    await asyncio.sleep(0.5)  # Fixed 0.5s delay between retries
 
-                # Fixed minimal backoff for faster recovery
-                await asyncio.sleep(0.5)  # Fixed 0.5s delay
+                except Exception as e:
+                    logger.error(
+                        "chatwoot_api_unexpected_error",
+                        method=method,
+                        endpoint=endpoint,
+                        error=str(e),
+                        attempt=attempt + 1,
+                    )
 
-        # Track failed API request (if we reach this point, all retries failed)
-        chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="failed").inc()
+                    if attempt == self.max_retries - 1:
+                        raise ChatwootServiceError(f"Unexpected error in Chatwoot API: {str(e)}")
 
-        raise ChatwootServiceError("Max retries exceeded for Chatwoot API request")
+                    # Fixed minimal backoff for faster recovery
+                    await asyncio.sleep(0.5)  # Fixed 0.5s delay
+
+            # Track failed API request (if we reach this point, all retries failed)
+            chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="failed").inc()
+            raise ChatwootServiceError("Max retries exceeded for Chatwoot API request")
+
+        # Execute request through circuit breaker
+        try:
+            return await circuit_breaker.call(_execute_request)
+        except CircuitOpenError:
+            # Circuit is open - return fallback response
+            logger.warning(
+                "chatwoot_circuit_open",
+                method=method,
+                endpoint=endpoint,
+                message="Circuit breaker is open, falling back"
+            )
+            # Track circuit breaker metrics
+            chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="circuit_open").inc()
+            raise ChatwootServiceError("Chatwoot service temporarily unavailable (circuit breaker open)")
 
     async def send_message(self, conversation_id: int, message: ChatwootApiMessage) -> ChatwootApiResponse:
         """Send a message to a Chatwoot conversation.

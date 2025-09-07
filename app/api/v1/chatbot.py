@@ -108,7 +108,9 @@ async def chat_stream(
             try:
                 agent = agent_service.get_agent()
                 full_response = ""
-                with llm_stream_duration_seconds.labels(model=agent.llm.model_name).time():
+                # Use the centralized method to get model name
+                model_name = agent.get_model_name()
+                with llm_stream_duration_seconds.labels(model=model_name).time():
                     async for chunk in agent.get_stream_response(
                         chat_request.messages, session.id, user_id=session.user_id
                     ):

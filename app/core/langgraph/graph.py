@@ -15,8 +15,6 @@ from langchain_core.messages import (
     ToolMessage,
     convert_to_openai_messages,
 )
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langfuse.langchain import CallbackHandler
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import (
@@ -33,6 +31,7 @@ from app.core.config import (
     settings,
 )
 from app.core.langgraph.tools import tools
+from app.core.llm.provider import create_llm_provider
 from app.core.logging import logger
 from app.core.metrics import llm_inference_duration_seconds
 from app.core.prompts import SYSTEM_PROMPT
@@ -56,49 +55,67 @@ class LangGraphAgent:
 
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
-        # Use environment-specific LLM model
-        # Check if we're using Gemini or OpenAI
-        if settings.LLM_PROVIDER == "gemini":
-            self.llm = ChatGoogleGenerativeAI(
-                model=settings.LLM_MODEL,  # e.g., "gemini-1.5-flash" or "gemini-1.5-pro"
-                temperature=settings.DEFAULT_LLM_TEMPERATURE,
-                google_api_key=settings.LLM_API_KEY,
-                max_output_tokens=settings.MAX_TOKENS,
-                **self._get_model_kwargs(),
-            ).bind_tools(tools)
-        else:  # Default to OpenAI
-            self.llm = ChatOpenAI(
-                model=settings.LLM_MODEL,
-                temperature=settings.DEFAULT_LLM_TEMPERATURE,
-                api_key=settings.LLM_API_KEY,
-                max_tokens=settings.MAX_TOKENS,
-                **self._get_model_kwargs(),
-            ).bind_tools(tools)
+        # Create LLM provider using factory
+        self.llm_provider = create_llm_provider()
+        self.llm = self.llm_provider.get_llm()
         self.tools_by_name = {tool.name: tool for tool in tools}
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
 
-        logger.info("llm_initialized", model=settings.LLM_MODEL, environment=settings.ENVIRONMENT.value)
+    def __del__(self):
+        """Cleanup resources when the agent is destroyed."""
+        # Note: This is a safety net. Proper cleanup should use close_connection_pool()
+        if self._connection_pool:
+            logger.warning("connection_pool_not_closed_properly", 
+                         message="Connection pool was not closed properly. Use close_connection_pool()")
+            # Can't await in destructor, so just set to None
+            self._connection_pool = None
 
-    def _get_model_kwargs(self) -> Dict[str, Any]:
-        """Get environment-specific model kwargs.
-
+    def get_model_name(self) -> str:
+        """Get the model name from the LLM provider.
+        
         Returns:
-            Dict[str, Any]: Additional model arguments based on environment
+            str: The model name, handling different provider attribute names
         """
-        model_kwargs = {}
+        # Use the provider's centralized method
+        return self.llm_provider.get_model_name()
 
-        # Development - we can use lower speeds for cost savings
-        if settings.ENVIRONMENT == Environment.DEVELOPMENT:
-            model_kwargs["top_p"] = 0.8
+    async def get_message_count_async(self, session_id: str) -> int:
+        """Get message count using native async query.
+        
+        Args:
+            session_id: Session ID to count messages for
+            
+        Returns:
+            int: Number of messages for the session
+        """
+        connection_pool = await self._get_connection_pool()
+        if not connection_pool:
+            logger.warning("no_connection_pool_for_message_count", session_id=session_id)
+            return 0
+            
+        try:
+            async with connection_pool.connection() as conn:
+                # Query the LangGraph checkpoint tables directly
+                # Use parameterized query to prevent SQL injection
+                result = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) 
+                    FROM checkpoint_writes 
+                    WHERE thread_id = $1 
+                    AND channel = 'messages'
+                    """,
+                    session_id
+                )
+                return result or 0
+        except Exception as e:
+            logger.error(
+                "async_message_count_failed", 
+                session_id=session_id, 
+                error=str(e)
+            )
+            return 0
 
-        # Production - use higher quality settings
-        elif settings.ENVIRONMENT == Environment.PRODUCTION:
-            model_kwargs["top_p"] = 0.95
-            model_kwargs["presence_penalty"] = 0.1
-            model_kwargs["frequency_penalty"] = 0.1
-
-        return model_kwargs
 
     async def _get_connection_pool(self) -> AsyncConnectionPool:
         """Get a PostgreSQL connection pool using environment-specific settings.
@@ -151,10 +168,12 @@ class LangGraphAgent:
         if self._connection_pool:
             try:
                 await self._connection_pool.close()
-                self._connection_pool = None
                 logger.info("connection_pool_closed", environment=settings.ENVIRONMENT.value)
             except Exception as e:
                 logger.error("connection_pool_close_failed", error=str(e), environment=settings.ENVIRONMENT.value)
+            finally:
+                # Always clear the reference to prevent reuse of broken pool
+                self._connection_pool = None
 
     async def _chat(self, state: GraphState) -> dict:
         """Process the chat state and generate a response.
@@ -174,8 +193,8 @@ class LangGraphAgent:
 
         for attempt in range(max_retries):
             try:
-                # Get model name - different attribute for different providers
-                model_name = getattr(self.llm, "model_name", None) or getattr(self.llm, "model", "unknown")
+                # Use the centralized method to get model name
+                model_name = self.get_model_name()
                 with llm_inference_duration_seconds.labels(model=model_name).time():
                     generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
                 logger.info(
@@ -225,14 +244,39 @@ class LangGraphAgent:
         """
         outputs = []
         for tool_call in state.messages[-1].tool_calls:
-            tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
-            outputs.append(
-                ToolMessage(
-                    content=tool_result,
-                    name=tool_call["name"],
-                    tool_call_id=tool_call["id"],
+            try:
+                # Execute the tool with error handling
+                tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+                outputs.append(
+                    ToolMessage(
+                        content=tool_result,
+                        name=tool_call["name"],
+                        tool_call_id=tool_call["id"],
+                    )
                 )
-            )
+                logger.debug(
+                    "tool_call_success",
+                    tool_name=tool_call["name"],
+                    session_id=state.session_id,
+                )
+            except Exception as e:
+                # Return error as tool message instead of failing the entire conversation
+                error_message = f"Tool execution failed: {str(e)}"
+                logger.error(
+                    "tool_call_failed",
+                    tool_name=tool_call["name"],
+                    error=str(e),
+                    session_id=state.session_id,
+                    exc_info=True,
+                )
+                outputs.append(
+                    ToolMessage(
+                        content=error_message,
+                        name=tool_call["name"],
+                        tool_call_id=tool_call["id"],
+                        additional_kwargs={"error": True, "error_type": type(e).__name__},
+                    )
+                )
         return {"messages": outputs}
 
     def _should_continue(self, state: GraphState) -> Literal["end", "continue"]:
@@ -353,22 +397,22 @@ class LangGraphAgent:
             from app.core.cache import ConversationCache
 
             async def fetch_message_count():
-                # Optimized: Use async database query with timeout
+                # Use native async query for better performance
                 try:
                     # Set timeout for database queries to prevent hanging
                     import asyncio
 
-                    state_before = await asyncio.wait_for(
-                        sync_to_async(self._graph.get_state)(config),
+                    # Use the new async method instead of sync_to_async
+                    return await asyncio.wait_for(
+                        self.get_message_count_async(session_id),
                         timeout=3.0,  # 3 second timeout
                     )
-                    return len(state_before.values.get("messages", [])) if state_before.values else 0
                 except asyncio.TimeoutError:
-                    logger.warning("db_state_query_timeout", session_id=session_id)
+                    logger.warning("db_message_count_timeout", session_id=session_id)
                     # Return 0 for new conversations to avoid blocking
                     return 0
                 except Exception as e:
-                    logger.error("db_state_query_failed", session_id=session_id, error=str(e))
+                    logger.error("db_message_count_failed", session_id=session_id, error=str(e))
                     return 0
 
             # Get message count from cache or database with faster cache TTL
@@ -460,9 +504,20 @@ class LangGraphAgent:
         if self._graph is None:
             self._graph = await self.create_graph()
 
-        state: StateSnapshot = await sync_to_async(self._graph.get_state)(
-            config={"configurable": {"thread_id": session_id}}
-        )
+        # Use async timeout to prevent hanging
+        try:
+            state: StateSnapshot = await asyncio.wait_for(
+                sync_to_async(self._graph.get_state)(
+                    config={"configurable": {"thread_id": session_id}}
+                ),
+                timeout=5.0  # 5 second timeout for history retrieval
+            )
+        except asyncio.TimeoutError:
+            logger.warning("chat_history_timeout", session_id=session_id)
+            return []
+        except Exception as e:
+            logger.error("chat_history_failed", session_id=session_id, error=str(e))
+            return []
 
         if not state.values:
             return []

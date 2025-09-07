@@ -10,6 +10,7 @@ from redis.asyncio import ConnectionPool, Redis
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.core.cache_keys import CacheKeys
 
 
 class RedisServiceError(Exception):
@@ -250,7 +251,7 @@ class RedisService:
         Returns:
             Message count or None if not cached
         """
-        key = f"message_count:{session_id}"
+        key = CacheKeys.message_count(session_id)
         count = await self.get(key)
         return int(count) if count is not None else None
 
@@ -265,7 +266,7 @@ class RedisService:
         Returns:
             True if successful
         """
-        key = f"message_count:{session_id}"
+        key = CacheKeys.message_count(session_id)
         ttl = ttl or settings.CACHE_MESSAGE_COUNT_TTL
         return await self.set(key, count, ttl)
 
@@ -278,7 +279,7 @@ class RedisService:
         Returns:
             True if deleted
         """
-        key = f"message_count:{session_id}"
+        key = CacheKeys.message_count(session_id)
         return await self.delete(key)
 
     async def get_windowed_message_count(self, session_id: str, context_window_size: int) -> Optional[int]:
@@ -291,7 +292,7 @@ class RedisService:
         Returns:
             Windowed message count or None if not cached
         """
-        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        key = CacheKeys.windowed_message_count(session_id, context_window_size)
         count = await self.get(key)
         return int(count) if count is not None else None
 
@@ -309,7 +310,7 @@ class RedisService:
         Returns:
             True if successful
         """
-        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        key = CacheKeys.windowed_message_count(session_id, context_window_size)
         ttl = ttl or settings.CACHE_MESSAGE_COUNT_TTL
         return await self.set(key, count, ttl)
 
@@ -323,7 +324,7 @@ class RedisService:
         Returns:
             True if deleted
         """
-        key = f"windowed_message_count:{session_id}:{context_window_size}"
+        key = CacheKeys.windowed_message_count(session_id, context_window_size)
         return await self.delete(key)
 
     async def cache_conversation_info(
@@ -339,7 +340,7 @@ class RedisService:
         Returns:
             True if successful
         """
-        key = f"conversation:{conversation_id}"
+        key = CacheKeys.conversation(conversation_id)
         ttl = ttl or settings.CACHE_CONVERSATION_TTL
         return await self.set(key, info, ttl)
 
@@ -352,7 +353,7 @@ class RedisService:
         Returns:
             Conversation info or None if not cached
         """
-        key = f"conversation:{conversation_id}"
+        key = CacheKeys.conversation(conversation_id)
         return await self.get(key)
 
     async def cache_contact_info(self, contact_id: int, info: Dict[str, Any], ttl: Optional[int] = None) -> bool:
@@ -366,7 +367,7 @@ class RedisService:
         Returns:
             True if successful
         """
-        key = f"contact:{contact_id}"
+        key = CacheKeys.contact(contact_id)
         ttl = ttl or settings.CACHE_CONTACT_TTL
         return await self.set(key, info, ttl)
 
@@ -379,7 +380,7 @@ class RedisService:
         Returns:
             Contact info or None if not cached
         """
-        key = f"contact:{contact_id}"
+        key = CacheKeys.contact(contact_id)
         return await self.get(key)
 
     async def health_check(self) -> Dict[str, Any]:
