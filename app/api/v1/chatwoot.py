@@ -36,6 +36,54 @@ from app.services.webhook_queue import webhook_queue_service
 router = APIRouter()
 
 
+async def extract_and_store_contact_info(webhook_data: ChatwootMessageWebhook) -> None:
+    """Extract and store contact information from webhook message if not already stored.
+    
+    This function extracts phone numbers from webhook payloads, but only if we don't
+    already have a phone number stored for this contact. This avoids expensive
+    repeated extractions and database operations.
+    
+    Args:
+        webhook_data: The parsed Chatwoot webhook payload
+    """
+    try:
+        # First check if we already have a phone number stored for this contact
+        stored_phone = user_identification_service.get_contact_phone_from_mapping(webhook_data.sender.id)
+        if stored_phone:
+            # We already have the phone, just update the sender object
+            webhook_data.sender.phone = stored_phone
+            logger.debug(
+                "contact_info_already_stored",
+                contact_id=webhook_data.sender.id,
+                phone=stored_phone,
+            )
+            return
+        
+        # Only extract if we don't have a stored phone number
+        phone_from_meta = user_identification_service.extract_phone_from_webhook_meta(webhook_data)
+        if phone_from_meta:
+            logger.info(
+                "phone_extracted_from_webhook_meta",
+                contact_id=webhook_data.sender.id,
+                conversation_id=webhook_data.conversation.id,
+                phone=phone_from_meta,
+                message_type=webhook_data.message_type,
+                event_type=webhook_data.event,
+            )
+            # Update sender object with found phone number for consistency
+            webhook_data.sender.phone = phone_from_meta
+            # Store the mapping for future use
+            user_identification_service.store_contact_phone_mapping(webhook_data.sender.id, phone_from_meta)
+            
+    except Exception as e:
+        logger.error(
+            "contact_info_extraction_failed",
+            contact_id=webhook_data.sender.id,
+            conversation_id=webhook_data.conversation.id,
+            error=str(e),
+        )
+
+
 @router.post("/webhook")
 @limiter.limit(settings.RATE_LIMIT_ENDPOINTS["chatwoot_webhook"][0])
 async def chatwoot_webhook(
@@ -80,11 +128,14 @@ async def chatwoot_webhook(
         chatwoot_webhooks_total.labels(event_type=event_type, status="received").inc()
 
         # Queue webhook for processing based on event type
-        if event_type == ChatwootEventType.MESSAGE_CREATED:
+        if event_type in [ChatwootEventType.MESSAGE_CREATED, ChatwootEventType.MESSAGE_UPDATED]:
             # Parse to validate structure
             webhook_data = ChatwootMessageWebhook(**payload)
 
-            # Only queue incoming messages from customers
+            # Always extract contact information first (for WhatsApp and other channels)
+            await extract_and_store_contact_info(webhook_data)
+
+            # Only queue incoming messages from customers for AI processing
             if webhook_data.message_type == "incoming":
                 # Add to queue for async processing
                 queued = await webhook_queue_service.enqueue(payload)
@@ -105,7 +156,9 @@ async def chatwoot_webhook(
                     background_tasks.add_task(process_incoming_message, webhook_data)
             else:
                 logger.debug(
-                    "chatwoot_outgoing_message_ignored", message_id=webhook_data.id, conversation_id=conversation_id
+                    "chatwoot_outgoing_message_processed_for_contact_info", 
+                    message_id=webhook_data.id, 
+                    conversation_id=conversation_id
                 )
 
         elif event_type == ChatwootEventType.CONVERSATION_CREATED:
@@ -182,8 +235,30 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
             logger.debug("chatwoot_empty_message_skipped", message_id=message_id)
             return
 
+        # Check if we have a stored phone number for this contact
+        stored_phone = user_identification_service.get_contact_phone_from_mapping(sender.id)
+        if stored_phone:
+            sender.phone = stored_phone
+            logger.info(
+                "using_stored_phone_mapping",
+                contact_id=sender.id,
+                conversation_id=conversation.id,
+                phone=stored_phone,
+            )
+        
         # Check if we need to request phone number from user
-        if user_identification_service.requires_phone_number(sender):
+        requires_phone = user_identification_service.requires_phone_number(sender)
+        
+        logger.info(
+            "phone_requirement_check",
+            contact_id=sender.id,
+            conversation_id=conversation.id,
+            requires_phone=requires_phone,
+            sender_has_phone=bool(sender.phone),
+            sender_phone=sender.phone if sender.phone else None,
+        )
+        
+        if requires_phone:
             # First, check if the message contains a phone number
             extracted_phone = user_identification_service.extract_phone_from_message(message_content)
 

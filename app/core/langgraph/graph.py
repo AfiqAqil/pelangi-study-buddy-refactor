@@ -277,7 +277,19 @@ class LangGraphAgent:
                 connection_pool = await self._get_connection_pool()
                 if connection_pool:
                     checkpointer = AsyncPostgresSaver(connection_pool)
-                    await checkpointer.setup()
+                    try:
+                        await checkpointer.setup()
+                    except Exception as setup_error:
+                        # Handle duplicate column error gracefully
+                        if "already exists" in str(setup_error):
+                            logger.warning(
+                                "checkpoint_setup_skipped_column_exists",
+                                error=str(setup_error),
+                                message="Checkpoint tables already set up, continuing...",
+                            )
+                        else:
+                            # Re-raise if it's a different error
+                            raise setup_error
                 else:
                     # In production, proceed without checkpointer if needed
                     checkpointer = None
