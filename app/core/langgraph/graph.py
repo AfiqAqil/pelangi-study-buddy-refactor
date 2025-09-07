@@ -129,13 +129,13 @@ class LangGraphAgent:
                 )
                 await self._connection_pool.open()
                 logger.info(
-                    "connection_pool_created", 
-                    max_size=max_size, 
+                    "connection_pool_created",
+                    max_size=max_size,
                     min_size=2,
                     timeout=settings.POSTGRES_POOL_TIMEOUT,
                     max_idle=settings.POSTGRES_MAX_IDLE,
                     max_lifetime=settings.POSTGRES_MAX_LIFETIME,
-                    environment=settings.ENVIRONMENT.value
+                    environment=settings.ENVIRONMENT.value,
                 )
             except Exception as e:
                 logger.error("connection_pool_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
@@ -345,9 +345,10 @@ class LangGraphAgent:
                 try:
                     # Set timeout for database queries to prevent hanging
                     import asyncio
+
                     state_before = await asyncio.wait_for(
                         sync_to_async(self._graph.get_state)(config),
-                        timeout=3.0  # 3 second timeout
+                        timeout=3.0,  # 3 second timeout
                     )
                     return len(state_before.values.get("messages", [])) if state_before.values else 0
                 except asyncio.TimeoutError:
@@ -380,9 +381,7 @@ class LangGraphAgent:
             new_message_count = len(all_messages)
             if new_message_count > messages_before_count:
                 # Use fire-and-forget cache update to avoid blocking response
-                asyncio.create_task(
-                    redis_service.set_message_count(session_id, new_message_count, ttl=600)
-                )
+                asyncio.create_task(redis_service.set_message_count(session_id, new_message_count, ttl=600))
                 logger.debug(
                     "message_count_cache_updated",
                     session_id=session_id,
@@ -452,14 +451,14 @@ class LangGraphAgent:
         state: StateSnapshot = await sync_to_async(self._graph.get_state)(
             config={"configurable": {"thread_id": session_id}}
         )
-        
+
         if not state.values:
             return []
-            
+
         # Get all messages and apply context window
         all_messages = self.__process_messages(state.values["messages"])
         windowed_messages = trim_messages_by_count(all_messages, settings.CONTEXT_WINDOW_SIZE)
-        
+
         return windowed_messages
 
     def __process_messages(self, messages: list[BaseMessage]) -> list[Message]:
@@ -483,9 +482,11 @@ class LangGraphAgent:
         try:
             # Make sure the pool is initialized in the current event loop
             conn_pool = await self._get_connection_pool()
-            
+
             if conn_pool is None:
-                logger.warning("no_connection_pool", session_id=session_id, message="Cannot clear history without connection pool")
+                logger.warning(
+                    "no_connection_pool", session_id=session_id, message="Cannot clear history without connection pool"
+                )
                 return
 
             # Use a connection with timeout and retry logic
@@ -501,19 +502,19 @@ class LangGraphAgent:
                                 logger.error(f"Error clearing {table}", error=str(table_error), session_id=session_id)
                                 raise table_error
                     break  # Success, exit retry loop
-                    
+
                 except Exception as conn_error:
                     logger.warning(
                         "connection_retry",
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         error=str(conn_error),
-                        session_id=session_id
+                        session_id=session_id,
                     )
                     if attempt == max_retries - 1:
                         raise conn_error
                     # Wait before retry with exponential backoff
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         except Exception as e:
             logger.error("Failed to clear chat history", error=str(e), session_id=session_id)

@@ -150,3 +150,34 @@ help:
 	@echo "  docker-compose-up: Start the entire stack (API, Prometheus, Grafana)"
 	@echo "  docker-compose-down: Stop the entire stack"
 	@echo "  docker-compose-logs: View logs from all services"
+	@echo "  db-create-migration MESSAGE='description': Create new database migration"
+	@echo "  db-upgrade: Apply pending database migrations"
+	@echo "  db-downgrade REVISION=id: Downgrade to specific migration"
+	@echo "  db-history: Show migration history"
+	@echo "  db-current: Show current database revision"
+	@echo "  db-stamp: Mark database as up-to-date without running migrations"
+
+# Database Migration Commands
+db-create-migration:
+	@echo "Creating new database migration..."
+	@python scripts/db_migrate.py create "$(MESSAGE)"
+
+db-upgrade:
+	@echo "Upgrading database to latest..."
+	@python scripts/db_migrate.py upgrade
+
+db-downgrade:
+	@echo "Downgrading database to revision: $(REVISION)"
+	@python scripts/db_migrate.py downgrade $(REVISION)
+
+db-history:
+	@echo "Showing migration history..."
+	@python scripts/db_migrate.py history
+
+db-current:
+	@echo "Showing current database revision..."
+	@python scripts/db_migrate.py current
+
+db-stamp:
+	@echo "Stamping database as up-to-date..."
+	@python scripts/db_migrate.py stamp

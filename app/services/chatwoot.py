@@ -44,7 +44,7 @@ class ChatwootService:
         # HTTP session and connection pool
         self.connector = None
         self.session = None
-        
+
         # Circuit breaker for API calls
         self.circuit_breaker = None
 
@@ -66,10 +66,10 @@ class ChatwootService:
                 recovery_timeout=30,  # Try recovery after 30 seconds
                 success_threshold=2,  # Need 2 successes to close
                 window_size=10,  # Track last 10 calls
-                expected_exception=ChatwootServiceError
+                expected_exception=ChatwootServiceError,
             )
         return self.circuit_breaker
-    
+
     async def _get_session(self):
         """Get or create HTTP session with connection pooling."""
         if self.session is None or self.session.closed:
@@ -91,7 +91,7 @@ class ChatwootService:
                 connect=10,  # Connection timeout
                 sock_read=self.timeout.total,  # Socket read timeout
             )
-            
+
             self.session = aiohttp.ClientSession(
                 connector=self.connector,
                 timeout=timeout,
@@ -231,15 +231,12 @@ class ChatwootService:
         try:
             # Get circuit breaker
             breaker = await self._get_circuit_breaker()
-            
+
             # Check if circuit is open - fail fast without making request
             if breaker.is_open:
-                logger.warning(
-                    "chatwoot_circuit_open_send_message",
-                    conversation_id=conversation_id
-                )
+                logger.warning("chatwoot_circuit_open_send_message", conversation_id=conversation_id)
                 raise CircuitOpenError("Chatwoot API circuit is open")
-            
+
             # Execute with circuit breaker protection
             async def _send():
                 endpoint = f"conversations/{conversation_id}/messages"
@@ -253,7 +250,7 @@ class ChatwootService:
 
                 response_data = await self._make_request("POST", endpoint, data)
                 return ChatwootApiResponse(id=response_data.get("id"), message="Message sent successfully")
-            
+
             return await breaker.call(_send)
 
         except CircuitOpenError:
@@ -388,22 +385,19 @@ class ChatwootService:
         try:
             # Get circuit breaker
             breaker = await self._get_circuit_breaker()
-            
+
             # For non-critical operations, skip if circuit is open
             if breaker.is_open:
-                logger.debug(
-                    "chatwoot_circuit_open_skipping_mark_read",
-                    conversation_id=conversation_id
-                )
+                logger.debug("chatwoot_circuit_open_skipping_mark_read", conversation_id=conversation_id)
                 return ChatwootApiResponse(message="Skipped due to circuit open")
-            
+
             # Execute with circuit breaker protection
             async def _mark_read():
                 endpoint = f"conversations/{conversation_id}/update_last_seen"
                 logger.debug("chatwoot_marking_conversation_read", conversation_id=conversation_id)
                 await self._make_request("POST", endpoint)
                 return ChatwootApiResponse(message="Conversation marked as read")
-            
+
             return await breaker.call(_mark_read)
 
         except CircuitOpenError:
@@ -413,6 +407,82 @@ class ChatwootService:
         except Exception as e:
             logger.error("chatwoot_mark_read_failed", conversation_id=conversation_id, error=str(e))
             raise ChatwootServiceError(f"Failed to mark conversation as read: {str(e)}")
+
+    async def merge_contacts(self, base_contact_id: int, mergee_contact_id: int) -> Optional[Dict[str, Any]]:
+        """Merge two Chatwoot contacts.
+
+        Args:
+            base_contact_id: Contact ID to merge into (will be kept)
+            mergee_contact_id: Contact ID to merge from (will be deleted)
+
+        Returns:
+            Optional[Dict[str, Any]]: Merge result data or None if failed
+
+        Raises:
+            ChatwootServiceError: If merging contacts fails
+        """
+        try:
+            endpoint = "actions/contact_merge"
+            data = {
+                "base_contact_id": base_contact_id,
+                "mergee_contact_id": mergee_contact_id,
+            }
+
+            logger.info(
+                "chatwoot_merging_contacts",
+                base_contact_id=base_contact_id,
+                mergee_contact_id=mergee_contact_id,
+            )
+
+            response_data = await self._make_request("POST", endpoint, data)
+
+            logger.info(
+                "chatwoot_contacts_merged_successfully",
+                base_contact_id=base_contact_id,
+                mergee_contact_id=mergee_contact_id,
+            )
+
+            return response_data
+
+        except Exception as e:
+            logger.error(
+                "chatwoot_merge_contacts_failed",
+                base_contact_id=base_contact_id,
+                mergee_contact_id=mergee_contact_id,
+                error=str(e),
+            )
+            raise ChatwootServiceError(f"Failed to merge contacts: {str(e)}")
+
+    async def get_contact(self, contact_id: int) -> Optional[ChatwootContact]:
+        """Get contact details from Chatwoot.
+
+        Args:
+            contact_id: The Chatwoot contact ID
+
+        Returns:
+            Optional[ChatwootContact]: The contact details or None if not found
+
+        Raises:
+            ChatwootServiceError: If fetching the contact fails
+        """
+        try:
+            endpoint = f"contacts/{contact_id}"
+
+            response_data = await self._make_request("GET", endpoint)
+
+            # Parse the response into our model
+            return ChatwootContact(
+                id=response_data["id"],
+                name=response_data.get("name"),
+                email=response_data.get("email"),
+                phone=response_data.get("phone_number"),
+                identifier=response_data.get("identifier"),
+                custom_attributes=response_data.get("custom_attributes", {}),
+            )
+
+        except Exception as e:
+            logger.error("chatwoot_get_contact_failed", contact_id=contact_id, error=str(e))
+            raise ChatwootServiceError(f"Failed to get contact: {str(e)}")
 
     async def health_check(self) -> bool:
         """Check if the Chatwoot API is accessible.

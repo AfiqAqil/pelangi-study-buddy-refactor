@@ -185,6 +185,7 @@ async def clear_chat_history(
         dict: A message indicating the chat history was cleared.
     """
     try:
+        agent = agent_service.get_agent()
         await agent.clear_chat_history(session.id)
         return {"message": "Chat history cleared successfully"}
     except Exception as e:

@@ -170,13 +170,13 @@ class Settings:
         self.POSTGRES_URL = os.getenv("POSTGRES_URL", "")
         self.POSTGRES_POOL_SIZE = int(os.getenv("POSTGRES_POOL_SIZE", "20"))
         self.POSTGRES_MAX_OVERFLOW = int(os.getenv("POSTGRES_MAX_OVERFLOW", "10"))
-        
+
         # LangGraph AsyncConnectionPool specific settings
         self.POSTGRES_CONNECT_TIMEOUT = int(os.getenv("POSTGRES_CONNECT_TIMEOUT", "10"))
         self.POSTGRES_POOL_TIMEOUT = int(os.getenv("POSTGRES_POOL_TIMEOUT", "30"))
         self.POSTGRES_MAX_IDLE = int(os.getenv("POSTGRES_MAX_IDLE", "300"))  # 5 minutes
         self.POSTGRES_MAX_LIFETIME = int(os.getenv("POSTGRES_MAX_LIFETIME", "3600"))  # 1 hour
-        
+
         self.CHECKPOINT_TABLES = ["checkpoint_blobs", "checkpoint_writes", "checkpoints"]
 
         # Rate Limiting Configuration
@@ -216,8 +216,12 @@ class Settings:
             int(os.getenv("CHATWOOT_ACCOUNT_ID", "0")) if os.getenv("CHATWOOT_ACCOUNT_ID") else 0
         )
         # Optimized for performance - shorter timeouts, fewer retries
-        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "5"))  # Optimized: Reduced to 5s for faster failure detection
-        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "1"))  # Optimized: Reduced to 1 retry for faster response
+        self.CHATWOOT_TIMEOUT = int(
+            os.getenv("CHATWOOT_TIMEOUT", "5")
+        )  # Optimized: Reduced to 5s for faster failure detection
+        self.CHATWOOT_MAX_RETRIES = int(
+            os.getenv("CHATWOOT_MAX_RETRIES", "1")
+        )  # Optimized: Reduced to 1 retry for faster response
 
         # Redis Configuration
         self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.services.agent import agent_service
+from app.services.user_identification import user_identification_service
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.core.metrics import (
@@ -87,7 +88,7 @@ async def chatwoot_webhook(
             if webhook_data.message_type == "incoming":
                 # Add to queue for async processing
                 queued = await webhook_queue_service.enqueue(payload)
-                
+
                 if queued:
                     logger.debug(
                         "chatwoot_message_queued",
@@ -104,9 +105,7 @@ async def chatwoot_webhook(
                     background_tasks.add_task(process_incoming_message, webhook_data)
             else:
                 logger.debug(
-                    "chatwoot_outgoing_message_ignored", 
-                    message_id=webhook_data.id, 
-                    conversation_id=conversation_id
+                    "chatwoot_outgoing_message_ignored", message_id=webhook_data.id, conversation_id=conversation_id
                 )
 
         elif event_type == ChatwootEventType.CONVERSATION_CREATED:
@@ -171,7 +170,6 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
         conversation = webhook_data.conversation
         sender = webhook_data.sender
         message_content = webhook_data.content
-        message_type = webhook_data.message_type
 
         logger.info(
             "chatwoot_processing_message",
@@ -184,14 +182,80 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
             logger.debug("chatwoot_empty_message_skipped", message_id=message_id)
             return
 
+        # Check if we need to request phone number from user
+        if user_identification_service.requires_phone_number(sender):
+            # First, check if the message contains a phone number
+            extracted_phone = user_identification_service.extract_phone_from_message(message_content)
+
+            if extracted_phone:
+                # Phone number provided, try to update contact and create user
+                logger.info("chatwoot_phone_extracted", contact_id=sender.id, phone=extracted_phone)
+
+                # Store the phone number mapping for future messages
+                mapping_stored = user_identification_service.store_contact_phone_mapping(sender.id, extracted_phone)
+                
+                if not mapping_stored:
+                    logger.error("chatwoot_invalid_phone_extracted", contact_id=sender.id, phone=extracted_phone)
+                    # Fall through to phone request
+                else:
+                    # Update the sender contact with the phone number
+                    sender.phone = extracted_phone
+
+                    # Now create user with the phone number
+                    user = user_identification_service.find_or_create_user_from_chatwoot(sender)
+
+                    if user:
+                        # Send confirmation message
+                        from app.schemas.chat import Message
+
+                        confirm_msg = Message(
+                            role="assistant",
+                            content=f"Great! I've registered your phone number {extracted_phone}. How can I help you today?",
+                        )
+                        confirm_message = MessageMapping.internal_to_chatwoot(confirm_msg)
+                        await chatwoot_service.send_message(conversation_id=conversation.id, message=confirm_message)
+
+                        # Mark conversation as read
+                        asyncio.create_task(mark_conversation_read_with_error_handling(conversation.id))
+
+                        # Don't process the phone number message through the agent
+                        # Just return after sending confirmation
+                        return
+                    else:
+                        logger.error(
+                            "chatwoot_user_creation_failed_after_phone", contact_id=sender.id, phone=extracted_phone
+                        )
+                        # Fall through to phone request
+
+            # No valid phone number found, request it
+            logger.info("chatwoot_requesting_phone", contact_id=sender.id, conversation_id=conversation.id)
+
+            # Send phone number request message
+            from app.schemas.chat import Message
+
+            phone_request_msg = Message(
+                role="assistant",
+                content="Hi! To better assist you, could you please share your phone number? Please provide it in the format +60XXXXXXXXX (Malaysian format).",
+            )
+            phone_request_message = MessageMapping.internal_to_chatwoot(phone_request_msg)
+            await chatwoot_service.send_message(conversation_id=conversation.id, message=phone_request_message)
+
+            # Don't process further, just wait for phone number
+            return
+        else:
+            # Find or create user based on phone number
+            user = user_identification_service.find_or_create_user_from_chatwoot(sender)
+
+            if not user:
+                logger.error("chatwoot_user_creation_failed", contact_id=sender.id, phone=sender.phone)
+                return
+
+            # Generate session ID and user ID
+            session_id = user_identification_service.get_user_session_id(user.id, conversation.id)
+            user_id = f"user_{user.id}"
+
         # Convert Chatwoot message to internal format
         internal_message = MessageMapping.chatwoot_to_internal(webhook_data)
-
-        # Generate session ID for conversation persistence
-        session_id = MessageMapping.conversation_to_session_id(webhook_data)
-
-        # Generate user ID from sender information
-        user_id = f"chatwoot_contact_{sender.id}"
 
         logger.debug("chatwoot_invoking_agent", session_id=session_id, conversation_id=conversation.id)
 
@@ -206,19 +270,15 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
                 # Convert internal message to Chatwoot format
                 chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
                 # Create concurrent task for sending message
-                send_tasks.append(
-                    send_message_with_error_handling(conversation.id, chatwoot_message)
-                )
-        
+                send_tasks.append(send_message_with_error_handling(conversation.id, chatwoot_message))
+
         # Mark conversation as read concurrently with message sending (fire-and-forget)
-        mark_read_task = asyncio.create_task(
-            mark_conversation_read_with_error_handling(conversation.id)
-        )
-        
+        asyncio.create_task(mark_conversation_read_with_error_handling(conversation.id))
+
         # Execute all message sending tasks concurrently for better performance
         if send_tasks:
             await asyncio.gather(*send_tasks, return_exceptions=True)
-        
+
         # Note: mark_read_task runs concurrently and doesn't block response
 
         logger.debug(
@@ -338,21 +398,21 @@ async def chatwoot_queue_stats(request: Request) -> Dict[str, Any]:
     """
     from app.workers.webhook_worker import webhook_worker_pool
     from app.core.circuit_breaker import circuit_breaker_manager
-    
+
     logger.debug("chatwoot_queue_stats_requested")
-    
+
     # Get queue statistics
     queue_size = await webhook_queue_service.get_queue_size()
     processing_count = await webhook_queue_service.get_processing_count()
-    
+
     # Get worker pool stats if available
     worker_stats = {}
     if webhook_worker_pool:
         worker_stats = await webhook_worker_pool.get_stats()
-    
+
     # Get circuit breaker stats
     circuit_stats = circuit_breaker_manager.get_all_stats().get("chatwoot_api", {})
-    
+
     return {
         "queue": {
             "size": queue_size,
@@ -367,19 +427,17 @@ async def chatwoot_queue_stats(request: Request) -> Dict[str, Any]:
 async def send_message_with_error_handling(conversation_id: int, chatwoot_message) -> None:
     """Send message to Chatwoot with proper error handling for concurrent execution."""
     try:
-        response_msg = await chatwoot_service.send_message(
-            conversation_id=conversation_id, message=chatwoot_message
-        )
-        
+        response_msg = await chatwoot_service.send_message(conversation_id=conversation_id, message=chatwoot_message)
+
         # Track successful message sending
         chatwoot_messages_sent_total.labels(status="success").inc()
-        
+
         logger.debug(
             "chatwoot_message_sent",
             conversation_id=conversation_id,
             message_id=response_msg.id,
         )
-        
+
     except ChatwootServiceError as e:
         # Track failed message sending
         chatwoot_messages_sent_total.labels(status="failed").inc()
@@ -396,5 +454,3 @@ async def mark_conversation_read_with_error_handling(conversation_id: int) -> No
         logger.warning("chatwoot_mark_read_failed", conversation_id=conversation_id, error=str(e))
     except Exception as e:
         logger.error("chatwoot_mark_read_unexpected_error", conversation_id=conversation_id, error=str(e))
-
-
