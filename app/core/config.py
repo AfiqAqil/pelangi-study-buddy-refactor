@@ -215,8 +215,8 @@ class Settings:
             int(os.getenv("CHATWOOT_ACCOUNT_ID", "0")) if os.getenv("CHATWOOT_ACCOUNT_ID") else 0
         )
         # Optimized for performance - shorter timeouts, fewer retries
-        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "15"))  # Reduced from 30s to 15s
-        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "2"))  # Reduced from 3 to 2
+        self.CHATWOOT_TIMEOUT = int(os.getenv("CHATWOOT_TIMEOUT", "5"))  # Optimized: Reduced to 5s for faster failure detection
+        self.CHATWOOT_MAX_RETRIES = int(os.getenv("CHATWOOT_MAX_RETRIES", "1"))  # Optimized: Reduced to 1 retry for faster response
 
         # Redis Configuration
         self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")

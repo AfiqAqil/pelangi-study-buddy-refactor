@@ -32,6 +32,8 @@ from app.services.database import database_service
 from app.services.redis import redis_service
 from app.services.chatwoot import chatwoot_service
 from app.services.agent import agent_service
+from app.workers.webhook_worker import WebhookWorkerPool
+import app.workers.webhook_worker as webhook_worker_module
 
 # Load environment variables
 load_dotenv()
@@ -63,10 +65,42 @@ async def lifespan(app: FastAPI):
         if settings.ENVIRONMENT.value != "production":
             # In non-production environments, we might want to know about Redis issues
             logger.warning("continuing_without_redis", message="Application will continue without Redis caching")
+    
+    # Initialize webhook worker pool if Chatwoot is enabled and Redis is available
+    if settings.CHATWOOT_ENABLED and redis_service.is_available():
+        try:
+            # Create worker pool with 5 workers, each handling up to 5 concurrent tasks
+            webhook_worker_module.webhook_worker_pool = WebhookWorkerPool(
+                num_workers=5,
+                max_concurrent_per_worker=5
+            )
+            await webhook_worker_module.webhook_worker_pool.start()
+            logger.info(
+                "webhook_worker_pool_started",
+                num_workers=5,
+                max_concurrent_per_worker=5
+            )
+        except Exception as e:
+            logger.error("webhook_worker_pool_initialization_failed", error=str(e))
+            # Continue without workers - fallback to direct processing
+    else:
+        logger.info(
+            "webhook_worker_pool_skipped",
+            chatwoot_enabled=settings.CHATWOOT_ENABLED,
+            redis_available=redis_service.is_available()
+        )
 
     yield
 
     # Cleanup on shutdown
+    # Stop webhook worker pool first
+    if webhook_worker_module.webhook_worker_pool:
+        try:
+            await webhook_worker_module.webhook_worker_pool.stop()
+            logger.info("webhook_worker_pool_stopped")
+        except Exception as e:
+            logger.error("webhook_worker_pool_stop_failed", error=str(e))
+    
     try:
         await redis_service.close()
         logger.info("redis_service_closed")

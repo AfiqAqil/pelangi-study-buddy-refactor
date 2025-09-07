@@ -30,6 +30,7 @@ from app.schemas.chatwoot import (
     MessageMapping,
 )
 from app.services.chatwoot import chatwoot_service, ChatwootServiceError
+from app.services.webhook_queue import webhook_queue_service
 
 router = APIRouter()
 
@@ -42,13 +43,13 @@ async def chatwoot_webhook(
 ) -> JSONResponse:
     """Handle incoming Chatwoot webhook events.
 
-    This endpoint receives webhook events from Chatwoot and processes them
-    based on the event type. Message events are processed asynchronously
-    to avoid blocking the webhook response.
+    This endpoint receives webhook events from Chatwoot and queues them
+    for asynchronous processing. This ensures fast webhook response times
+    and better scalability.
 
     Args:
         request: The FastAPI request object containing the webhook payload
-        background_tasks: FastAPI background tasks for async processing
+        background_tasks: FastAPI background tasks (kept for compatibility)
 
     Returns:
         JSONResponse: Acknowledgment response to Chatwoot
@@ -77,24 +78,35 @@ async def chatwoot_webhook(
         # Track webhook metrics
         chatwoot_webhooks_total.labels(event_type=event_type, status="received").inc()
 
-        # Handle different event types
+        # Queue webhook for processing based on event type
         if event_type == ChatwootEventType.MESSAGE_CREATED:
-            # Parse as message webhook
+            # Parse to validate structure
             webhook_data = ChatwootMessageWebhook(**payload)
 
-            # Only process incoming messages from customers (not agent messages)
+            # Only queue incoming messages from customers
             if webhook_data.message_type == "incoming":
-                # Process message asynchronously to avoid blocking webhook response
-                background_tasks.add_task(process_incoming_message, webhook_data)
-
-                logger.debug(
-                    "chatwoot_message_queued_for_processing",
-                    message_id=webhook_data.id,
-                    conversation_id=conversation_id,
-                )
+                # Add to queue for async processing
+                queued = await webhook_queue_service.enqueue(payload)
+                
+                if queued:
+                    logger.debug(
+                        "chatwoot_message_queued",
+                        message_id=webhook_data.id,
+                        conversation_id=conversation_id,
+                    )
+                else:
+                    # Fallback to direct processing if queue fails
+                    logger.warning(
+                        "chatwoot_queue_failed_using_fallback",
+                        message_id=webhook_data.id,
+                        conversation_id=conversation_id,
+                    )
+                    background_tasks.add_task(process_incoming_message, webhook_data)
             else:
                 logger.debug(
-                    "chatwoot_outgoing_message_ignored", message_id=webhook_data.id, conversation_id=conversation_id
+                    "chatwoot_outgoing_message_ignored", 
+                    message_id=webhook_data.id, 
+                    conversation_id=conversation_id
                 )
 
         elif event_type == ChatwootEventType.CONVERSATION_CREATED:
@@ -310,6 +322,44 @@ async def chatwoot_config(request: Request) -> Dict[str, Any]:
         "has_api_token": bool(settings.CHATWOOT_API_ACCESS_TOKEN),
         "timeout": settings.CHATWOOT_TIMEOUT,
         "max_retries": settings.CHATWOOT_MAX_RETRIES,
+    }
+
+
+@router.get("/queue/stats")
+@limiter.limit("10 per minute")
+async def chatwoot_queue_stats(request: Request) -> Dict[str, Any]:
+    """Get webhook queue statistics.
+
+    Args:
+        request: The FastAPI request object
+
+    Returns:
+        Dict[str, Any]: Queue statistics
+    """
+    from app.workers.webhook_worker import webhook_worker_pool
+    from app.core.circuit_breaker import circuit_breaker_manager
+    
+    logger.debug("chatwoot_queue_stats_requested")
+    
+    # Get queue statistics
+    queue_size = await webhook_queue_service.get_queue_size()
+    processing_count = await webhook_queue_service.get_processing_count()
+    
+    # Get worker pool stats if available
+    worker_stats = {}
+    if webhook_worker_pool:
+        worker_stats = await webhook_worker_pool.get_stats()
+    
+    # Get circuit breaker stats
+    circuit_stats = circuit_breaker_manager.get_all_stats().get("chatwoot_api", {})
+    
+    return {
+        "queue": {
+            "size": queue_size,
+            "processing": processing_count,
+        },
+        "workers": worker_stats,
+        "circuit_breaker": circuit_stats,
     }
 
 

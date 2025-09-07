@@ -14,6 +14,7 @@ from app.core.metrics import (
     chatwoot_api_requests_total,
     chatwoot_api_request_duration_seconds,
 )
+from app.core.circuit_breaker import circuit_breaker_manager, CircuitOpenError
 from app.schemas.chatwoot import (
     ChatwootApiMessage,
     ChatwootApiResponse,
@@ -43,6 +44,9 @@ class ChatwootService:
         # HTTP session and connection pool
         self.connector = None
         self.session = None
+        
+        # Circuit breaker for API calls
+        self.circuit_breaker = None
 
         # Validate configuration
         if not all([self.base_url, self.api_access_token, self.account_id]):
@@ -53,14 +57,27 @@ class ChatwootService:
                 account_id=bool(self.account_id),
             )
 
+    async def _get_circuit_breaker(self):
+        """Get or create circuit breaker for API calls."""
+        if self.circuit_breaker is None:
+            self.circuit_breaker = await circuit_breaker_manager.get_or_create(
+                name="chatwoot_api",
+                failure_threshold=3,  # Open after 3 failures
+                recovery_timeout=30,  # Try recovery after 30 seconds
+                success_threshold=2,  # Need 2 successes to close
+                window_size=10,  # Track last 10 calls
+                expected_exception=ChatwootServiceError
+            )
+        return self.circuit_breaker
+    
     async def _get_session(self):
         """Get or create HTTP session with connection pooling."""
         if self.session is None or self.session.closed:
             # Create connector with optimized connection pooling for performance
             self.connector = aiohttp.TCPConnector(
-                limit=50,  # Reduced total pool size for faster connection reuse
-                limit_per_host=10,  # Reduced per-host limit for faster cycling
-                keepalive_timeout=60,  # Increased keepalive for better reuse
+                limit=100,  # Increased total pool size for better concurrency
+                limit_per_host=30,  # Increased per-host limit for more parallel requests
+                keepalive_timeout=120,  # Increased keepalive for better connection reuse
                 enable_cleanup_closed=True,  # Clean up closed connections
                 use_dns_cache=True,  # Cache DNS lookups
                 ttl_dns_cache=600,  # Longer DNS cache TTL for performance
@@ -86,7 +103,7 @@ class ChatwootService:
             )
 
             logger.debug(
-                "chatwoot_session_created", pool_limit=50, per_host_limit=10, timeout=settings.CHATWOOT_TIMEOUT
+                "chatwoot_session_created", pool_limit=100, per_host_limit=30, timeout=settings.CHATWOOT_TIMEOUT
             )
 
         return self.session
@@ -174,8 +191,8 @@ class ChatwootService:
                 if attempt == self.max_retries - 1:
                     raise ChatwootServiceError(f"Chatwoot API request failed: {str(e)}")
 
-                # Linear backoff instead of exponential - much faster recovery
-                await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s instead of 1s, 2s, 4s
+                # Fixed minimal backoff for faster recovery
+                await asyncio.sleep(0.5)  # Fixed 0.5s delay between retries
 
             except Exception as e:
                 logger.error(
@@ -189,8 +206,8 @@ class ChatwootService:
                 if attempt == self.max_retries - 1:
                     raise ChatwootServiceError(f"Unexpected error in Chatwoot API: {str(e)}")
 
-                # Linear backoff for faster recovery
-                await asyncio.sleep(0.5 * (attempt + 1))
+                # Fixed minimal backoff for faster recovery
+                await asyncio.sleep(0.5)  # Fixed 0.5s delay
 
         # Track failed API request (if we reach this point, all retries failed)
         chatwoot_api_requests_total.labels(endpoint=endpoint, method=method, status="failed").inc()
@@ -209,21 +226,39 @@ class ChatwootService:
 
         Raises:
             ChatwootServiceError: If sending the message fails
+            CircuitOpenError: If circuit breaker is open
         """
         try:
-            endpoint = f"conversations/{conversation_id}/messages"
-            data = message.model_dump()
+            # Get circuit breaker
+            breaker = await self._get_circuit_breaker()
+            
+            # Check if circuit is open - fail fast without making request
+            if breaker.is_open:
+                logger.warning(
+                    "chatwoot_circuit_open_send_message",
+                    conversation_id=conversation_id
+                )
+                raise CircuitOpenError("Chatwoot API circuit is open")
+            
+            # Execute with circuit breaker protection
+            async def _send():
+                endpoint = f"conversations/{conversation_id}/messages"
+                data = message.model_dump()
 
-            logger.debug(
-                "chatwoot_sending_message",
-                conversation_id=conversation_id,
-                message_type=message.message_type,
-            )
+                logger.debug(
+                    "chatwoot_sending_message",
+                    conversation_id=conversation_id,
+                    message_type=message.message_type,
+                )
 
-            response_data = await self._make_request("POST", endpoint, data)
+                response_data = await self._make_request("POST", endpoint, data)
+                return ChatwootApiResponse(id=response_data.get("id"), message="Message sent successfully")
+            
+            return await breaker.call(_send)
 
-            return ChatwootApiResponse(id=response_data.get("id"), message="Message sent successfully")
-
+        except CircuitOpenError:
+            # Re-raise circuit open errors
+            raise
         except Exception as e:
             logger.error("chatwoot_send_message_failed", conversation_id=conversation_id, error=str(e))
             raise ChatwootServiceError(f"Failed to send message: {str(e)}")
@@ -351,14 +386,30 @@ class ChatwootService:
             ChatwootServiceError: If marking as read fails
         """
         try:
-            endpoint = f"conversations/{conversation_id}/update_last_seen"
+            # Get circuit breaker
+            breaker = await self._get_circuit_breaker()
+            
+            # For non-critical operations, skip if circuit is open
+            if breaker.is_open:
+                logger.debug(
+                    "chatwoot_circuit_open_skipping_mark_read",
+                    conversation_id=conversation_id
+                )
+                return ChatwootApiResponse(message="Skipped due to circuit open")
+            
+            # Execute with circuit breaker protection
+            async def _mark_read():
+                endpoint = f"conversations/{conversation_id}/update_last_seen"
+                logger.debug("chatwoot_marking_conversation_read", conversation_id=conversation_id)
+                await self._make_request("POST", endpoint)
+                return ChatwootApiResponse(message="Conversation marked as read")
+            
+            return await breaker.call(_mark_read)
 
-            logger.debug("chatwoot_marking_conversation_read", conversation_id=conversation_id)
-
-            await self._make_request("POST", endpoint)
-
-            return ChatwootApiResponse(message="Conversation marked as read")
-
+        except CircuitOpenError:
+            # For non-critical operation, just log and return
+            logger.debug("chatwoot_mark_read_circuit_open", conversation_id=conversation_id)
+            return ChatwootApiResponse(message="Skipped due to circuit open")
         except Exception as e:
             logger.error("chatwoot_mark_read_failed", conversation_id=conversation_id, error=str(e))
             raise ChatwootServiceError(f"Failed to mark conversation as read: {str(e)}")
