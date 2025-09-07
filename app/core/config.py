@@ -154,6 +154,7 @@ class Settings:
         self.DEFAULT_LLM_TEMPERATURE = float(os.getenv("DEFAULT_LLM_TEMPERATURE", "0.2"))
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
         self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
+        self.CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "10"))
 
         # JWT Configuration
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
@@ -169,6 +170,13 @@ class Settings:
         self.POSTGRES_URL = os.getenv("POSTGRES_URL", "")
         self.POSTGRES_POOL_SIZE = int(os.getenv("POSTGRES_POOL_SIZE", "20"))
         self.POSTGRES_MAX_OVERFLOW = int(os.getenv("POSTGRES_MAX_OVERFLOW", "10"))
+
+        # LangGraph AsyncConnectionPool specific settings
+        self.POSTGRES_CONNECT_TIMEOUT = int(os.getenv("POSTGRES_CONNECT_TIMEOUT", "10"))
+        self.POSTGRES_POOL_TIMEOUT = int(os.getenv("POSTGRES_POOL_TIMEOUT", "30"))
+        self.POSTGRES_MAX_IDLE = int(os.getenv("POSTGRES_MAX_IDLE", "300"))  # 5 minutes
+        self.POSTGRES_MAX_LIFETIME = int(os.getenv("POSTGRES_MAX_LIFETIME", "3600"))  # 1 hour
+
         self.CHECKPOINT_TABLES = ["checkpoint_blobs", "checkpoint_writes", "checkpoints"]
 
         # Rate Limiting Configuration
@@ -183,6 +191,7 @@ class Settings:
             "login": ["20 per minute"],
             "root": ["10 per minute"],
             "health": ["20 per minute"],
+            "chatwoot_webhook": ["100 per minute"],
         }
 
         # Update rate limit endpoints from environment variables
@@ -198,6 +207,39 @@ class Settings:
         self.EVALUATION_BASE_URL = os.getenv("EVALUATION_BASE_URL", "https://api.openai.com/v1")
         self.EVALUATION_API_KEY = os.getenv("EVALUATION_API_KEY", self.LLM_API_KEY)
         self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "10"))
+
+        # Chatwoot Integration Configuration
+        self.CHATWOOT_ENABLED = os.getenv("CHATWOOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+        self.CHATWOOT_BASE_URL = os.getenv("CHATWOOT_BASE_URL", "")
+        self.CHATWOOT_API_ACCESS_TOKEN = os.getenv("CHATWOOT_API_ACCESS_TOKEN", "")
+        self.CHATWOOT_ACCOUNT_ID = (
+            int(os.getenv("CHATWOOT_ACCOUNT_ID", "0")) if os.getenv("CHATWOOT_ACCOUNT_ID") else 0
+        )
+        # Optimized for performance - shorter timeouts, fewer retries
+        self.CHATWOOT_TIMEOUT = int(
+            os.getenv("CHATWOOT_TIMEOUT", "5")
+        )  # Optimized: Reduced to 5s for faster failure detection
+        self.CHATWOOT_MAX_RETRIES = int(
+            os.getenv("CHATWOOT_MAX_RETRIES", "1")
+        )  # Optimized: Reduced to 1 retry for faster response
+
+        # Redis Configuration
+        self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+        self.REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+        self.REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+        self.REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+        self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+        self.REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
+        self.REDIS_SOCKET_CONNECT_TIMEOUT = int(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT", "5"))
+        self.REDIS_SOCKET_KEEPALIVE = os.getenv("REDIS_SOCKET_KEEPALIVE", "true").lower() in ("true", "1", "t", "yes")
+        self.REDIS_SOCKET_KEEPALIVE_OPTIONS = {}
+
+        # Cache Configuration - Optimized for performance
+        self.CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "600"))  # Increased to 10 minutes
+        self.CACHE_MESSAGE_COUNT_TTL = int(os.getenv("CACHE_MESSAGE_COUNT_TTL", "600"))  # Increased to 10 minutes
+        self.CACHE_CONVERSATION_TTL = int(os.getenv("CACHE_CONVERSATION_TTL", "1800"))  # 30 minutes
+        self.CACHE_CONTACT_TTL = int(os.getenv("CACHE_CONTACT_TTL", "3600"))  # 1 hour
 
         # Apply environment-specific settings
         self.apply_environment_settings()

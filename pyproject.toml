@@ -34,10 +34,19 @@ dependencies = [
     "langchain-community>=0.3.20",
     "tqdm>=4.67.1",
     "colorama>=0.4.6",
+    "redis>=5.0.0",
+    "hiredis>=2.4.1",
+    "alembic>=1.16.5",
 ]
 
 [project.optional-dependencies]
-dev = ["black", "isort", "flake8", "ruff", "djlint==1.36.4"]
+dev = [
+    "black",
+    "isort",
+    "flake8",
+    "ruff",
+    "djlint==1.36.4",
+]
 
 [dependency-groups]
 test = ["httpx>=0.28.1", "pytest>=8.3.5"]

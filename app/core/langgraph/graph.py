@@ -1,5 +1,6 @@
 """This file contains the LangGraph Agent/workflow and interactions with the LLM."""
 
+import asyncio
 from typing import (
     Any,
     AsyncGenerator,
@@ -14,8 +15,6 @@ from langchain_core.messages import (
     ToolMessage,
     convert_to_openai_messages,
 )
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langfuse.langchain import CallbackHandler
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import (
@@ -32,6 +31,7 @@ from app.core.config import (
     settings,
 )
 from app.core.langgraph.tools import tools
+from app.core.llm.provider import create_llm_provider
 from app.core.logging import logger
 from app.core.metrics import llm_inference_duration_seconds
 from app.core.prompts import SYSTEM_PROMPT
@@ -42,6 +42,7 @@ from app.schemas import (
 from app.utils import (
     dump_messages,
     prepare_messages,
+    trim_messages_by_count,
 )
 
 
@@ -54,49 +55,67 @@ class LangGraphAgent:
 
     def __init__(self):
         """Initialize the LangGraph Agent with necessary components."""
-        # Use environment-specific LLM model
-        # Check if we're using Gemini or OpenAI
-        if settings.LLM_PROVIDER == "gemini":
-            self.llm = ChatGoogleGenerativeAI(
-                model=settings.LLM_MODEL,  # e.g., "gemini-1.5-flash" or "gemini-1.5-pro"
-                temperature=settings.DEFAULT_LLM_TEMPERATURE,
-                google_api_key=settings.LLM_API_KEY,
-                max_output_tokens=settings.MAX_TOKENS,
-                **self._get_model_kwargs(),
-            ).bind_tools(tools)
-        else:  # Default to OpenAI
-            self.llm = ChatOpenAI(
-                model=settings.LLM_MODEL,
-                temperature=settings.DEFAULT_LLM_TEMPERATURE,
-                api_key=settings.LLM_API_KEY,
-                max_tokens=settings.MAX_TOKENS,
-                **self._get_model_kwargs(),
-            ).bind_tools(tools)
+        # Create LLM provider using factory
+        self.llm_provider = create_llm_provider()
+        self.llm = self.llm_provider.get_llm()
         self.tools_by_name = {tool.name: tool for tool in tools}
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
 
-        logger.info("llm_initialized", model=settings.LLM_MODEL, environment=settings.ENVIRONMENT.value)
+    def __del__(self):
+        """Cleanup resources when the agent is destroyed."""
+        # Note: This is a safety net. Proper cleanup should use close_connection_pool()
+        if self._connection_pool:
+            logger.warning("connection_pool_not_closed_properly", 
+                         message="Connection pool was not closed properly. Use close_connection_pool()")
+            # Can't await in destructor, so just set to None
+            self._connection_pool = None
 
-    def _get_model_kwargs(self) -> Dict[str, Any]:
-        """Get environment-specific model kwargs.
-
+    def get_model_name(self) -> str:
+        """Get the model name from the LLM provider.
+        
         Returns:
-            Dict[str, Any]: Additional model arguments based on environment
+            str: The model name, handling different provider attribute names
         """
-        model_kwargs = {}
+        # Use the provider's centralized method
+        return self.llm_provider.get_model_name()
 
-        # Development - we can use lower speeds for cost savings
-        if settings.ENVIRONMENT == Environment.DEVELOPMENT:
-            model_kwargs["top_p"] = 0.8
+    async def get_message_count_async(self, session_id: str) -> int:
+        """Get message count using native async query.
+        
+        Args:
+            session_id: Session ID to count messages for
+            
+        Returns:
+            int: Number of messages for the session
+        """
+        connection_pool = await self._get_connection_pool()
+        if not connection_pool:
+            logger.warning("no_connection_pool_for_message_count", session_id=session_id)
+            return 0
+            
+        try:
+            async with connection_pool.connection() as conn:
+                # Query the LangGraph checkpoint tables directly
+                # Use parameterized query to prevent SQL injection
+                result = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) 
+                    FROM checkpoint_writes 
+                    WHERE thread_id = $1 
+                    AND channel = 'messages'
+                    """,
+                    session_id
+                )
+                return result or 0
+        except Exception as e:
+            logger.error(
+                "async_message_count_failed", 
+                session_id=session_id, 
+                error=str(e)
+            )
+            return 0
 
-        # Production - use higher quality settings
-        elif settings.ENVIRONMENT == Environment.PRODUCTION:
-            model_kwargs["top_p"] = 0.95
-            model_kwargs["presence_penalty"] = 0.1
-            model_kwargs["frequency_penalty"] = 0.1
-
-        return model_kwargs
 
     async def _get_connection_pool(self) -> AsyncConnectionPool:
         """Get a PostgreSQL connection pool using environment-specific settings.
@@ -113,14 +132,28 @@ class LangGraphAgent:
                     settings.POSTGRES_URL,
                     open=False,
                     max_size=max_size,
+                    min_size=2,  # Maintain minimum connections
                     kwargs={
                         "autocommit": True,
-                        "connect_timeout": 5,
+                        "connect_timeout": settings.POSTGRES_CONNECT_TIMEOUT,
+                        "application_name": f"langgraph-agent-{settings.ENVIRONMENT.value}",
                         "prepare_threshold": None,
                     },
+                    # Pool configuration
+                    timeout=settings.POSTGRES_POOL_TIMEOUT,
+                    max_idle=settings.POSTGRES_MAX_IDLE,
+                    max_lifetime=settings.POSTGRES_MAX_LIFETIME,
                 )
                 await self._connection_pool.open()
-                logger.info("connection_pool_created", max_size=max_size, environment=settings.ENVIRONMENT.value)
+                logger.info(
+                    "connection_pool_created",
+                    max_size=max_size,
+                    min_size=2,
+                    timeout=settings.POSTGRES_POOL_TIMEOUT,
+                    max_idle=settings.POSTGRES_MAX_IDLE,
+                    max_lifetime=settings.POSTGRES_MAX_LIFETIME,
+                    environment=settings.ENVIRONMENT.value,
+                )
             except Exception as e:
                 logger.error("connection_pool_creation_failed", error=str(e), environment=settings.ENVIRONMENT.value)
                 # In production, we might want to degrade gracefully
@@ -129,6 +162,18 @@ class LangGraphAgent:
                     return None
                 raise e
         return self._connection_pool
+
+    async def close_connection_pool(self) -> None:
+        """Close the PostgreSQL connection pool gracefully."""
+        if self._connection_pool:
+            try:
+                await self._connection_pool.close()
+                logger.info("connection_pool_closed", environment=settings.ENVIRONMENT.value)
+            except Exception as e:
+                logger.error("connection_pool_close_failed", error=str(e), environment=settings.ENVIRONMENT.value)
+            finally:
+                # Always clear the reference to prevent reuse of broken pool
+                self._connection_pool = None
 
     async def _chat(self, state: GraphState) -> dict:
         """Process the chat state and generate a response.
@@ -148,8 +193,8 @@ class LangGraphAgent:
 
         for attempt in range(max_retries):
             try:
-                # Get model name - different attribute for different providers
-                model_name = getattr(self.llm, 'model_name', None) or getattr(self.llm, 'model', 'unknown')
+                # Use the centralized method to get model name
+                model_name = self.get_model_name()
                 with llm_inference_duration_seconds.labels(model=model_name).time():
                     generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
                 logger.info(
@@ -178,9 +223,9 @@ class LangGraphAgent:
                         "using_fallback_model", model=fallback_model, environment=settings.ENVIRONMENT.value
                     )
                     # Set model name appropriately based on provider
-                    if hasattr(self.llm, 'model_name'):
+                    if hasattr(self.llm, "model_name"):
                         self.llm.model_name = fallback_model
-                    elif hasattr(self.llm, 'model'):
+                    elif hasattr(self.llm, "model"):
                         self.llm.model = fallback_model
 
                 continue
@@ -199,14 +244,39 @@ class LangGraphAgent:
         """
         outputs = []
         for tool_call in state.messages[-1].tool_calls:
-            tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
-            outputs.append(
-                ToolMessage(
-                    content=tool_result,
-                    name=tool_call["name"],
-                    tool_call_id=tool_call["id"],
+            try:
+                # Execute the tool with error handling
+                tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+                outputs.append(
+                    ToolMessage(
+                        content=tool_result,
+                        name=tool_call["name"],
+                        tool_call_id=tool_call["id"],
+                    )
                 )
-            )
+                logger.debug(
+                    "tool_call_success",
+                    tool_name=tool_call["name"],
+                    session_id=state.session_id,
+                )
+            except Exception as e:
+                # Return error as tool message instead of failing the entire conversation
+                error_message = f"Tool execution failed: {str(e)}"
+                logger.error(
+                    "tool_call_failed",
+                    tool_name=tool_call["name"],
+                    error=str(e),
+                    session_id=state.session_id,
+                    exc_info=True,
+                )
+                outputs.append(
+                    ToolMessage(
+                        content=error_message,
+                        name=tool_call["name"],
+                        tool_call_id=tool_call["id"],
+                        additional_kwargs={"error": True, "error_type": type(e).__name__},
+                    )
+                )
         return {"messages": outputs}
 
     def _should_continue(self, state: GraphState) -> Literal["end", "continue"]:
@@ -251,7 +321,19 @@ class LangGraphAgent:
                 connection_pool = await self._get_connection_pool()
                 if connection_pool:
                     checkpointer = AsyncPostgresSaver(connection_pool)
-                    await checkpointer.setup()
+                    try:
+                        await checkpointer.setup()
+                    except Exception as setup_error:
+                        # Handle duplicate column error gracefully
+                        if "already exists" in str(setup_error):
+                            logger.warning(
+                                "checkpoint_setup_skipped_column_exists",
+                                error=str(setup_error),
+                                message="Checkpoint tables already set up, continuing...",
+                            )
+                        else:
+                            # Re-raise if it's a different error
+                            raise setup_error
                 else:
                     # In production, proceed without checkpointer if needed
                     checkpointer = None
@@ -283,8 +365,8 @@ class LangGraphAgent:
         messages: list[Message],
         session_id: str,
         user_id: Optional[str] = None,
-    ) -> list[dict]:
-        """Get a response from the LLM.
+    ) -> dict:
+        """Get a response from the LLM with tracking of new messages.
 
         Args:
             messages (list[Message]): The messages to send to the LLM.
@@ -292,7 +374,10 @@ class LangGraphAgent:
             user_id (Optional[str]): The user ID for Langfuse tracking.
 
         Returns:
-            list[dict]: The response from the LLM.
+            dict: Contains:
+                - 'messages': All messages in the conversation
+                - 'new_messages': Only the newly generated messages
+                - 'new_start_index': Index where new messages begin
         """
         if self._graph is None:
             self._graph = await self.create_graph()
@@ -307,10 +392,64 @@ class LangGraphAgent:
             },
         }
         try:
+            # Try to get message count from Redis cache first (performance optimization)
+            from app.services.redis import redis_service
+            from app.core.cache import ConversationCache
+
+            async def fetch_message_count():
+                # Use native async query for better performance
+                try:
+                    # Set timeout for database queries to prevent hanging
+                    import asyncio
+
+                    # Use the new async method instead of sync_to_async
+                    return await asyncio.wait_for(
+                        self.get_message_count_async(session_id),
+                        timeout=3.0,  # 3 second timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("db_message_count_timeout", session_id=session_id)
+                    # Return 0 for new conversations to avoid blocking
+                    return 0
+                except Exception as e:
+                    logger.error("db_message_count_failed", session_id=session_id, error=str(e))
+                    return 0
+
+            # Get message count from cache or database with faster cache TTL
+            messages_before_count = await ConversationCache.get_or_set_message_count(
+                session_id,
+                fetch_message_count,
+                ttl=600,  # Cache for 10 minutes (longer cache)
+            )
+
+            # Invoke the graph with new messages
             response = await self._graph.ainvoke(
                 {"messages": dump_messages(messages), "session_id": session_id}, config
             )
-            return self.__process_messages(response["messages"])
+
+            # Process all messages
+            all_messages = self.__process_messages(response["messages"])
+
+            # Calculate where new messages start (after original + user input)
+            new_start_index = messages_before_count + len(messages)
+
+            # Update cache with new message count for next request
+            new_message_count = len(all_messages)
+            if new_message_count > messages_before_count:
+                # Use fire-and-forget cache update to avoid blocking response
+                asyncio.create_task(redis_service.set_message_count(session_id, new_message_count, ttl=600))
+                logger.debug(
+                    "message_count_cache_updated",
+                    session_id=session_id,
+                    old_count=messages_before_count,
+                    new_count=new_message_count,
+                )
+
+            return {
+                "messages": all_messages,
+                "new_messages": all_messages[new_start_index:],
+                "new_start_index": new_start_index,
+            }
         except Exception as e:
             logger.error(f"Error getting response: {str(e)}")
             raise e
@@ -360,15 +499,34 @@ class LangGraphAgent:
             session_id (str): The session ID for the conversation.
 
         Returns:
-            list[Message]: The chat history.
+            list[Message]: The chat history with context window applied.
         """
         if self._graph is None:
             self._graph = await self.create_graph()
 
-        state: StateSnapshot = await sync_to_async(self._graph.get_state)(
-            config={"configurable": {"thread_id": session_id}}
-        )
-        return self.__process_messages(state.values["messages"]) if state.values else []
+        # Use async timeout to prevent hanging
+        try:
+            state: StateSnapshot = await asyncio.wait_for(
+                sync_to_async(self._graph.get_state)(
+                    config={"configurable": {"thread_id": session_id}}
+                ),
+                timeout=5.0  # 5 second timeout for history retrieval
+            )
+        except asyncio.TimeoutError:
+            logger.warning("chat_history_timeout", session_id=session_id)
+            return []
+        except Exception as e:
+            logger.error("chat_history_failed", session_id=session_id, error=str(e))
+            return []
+
+        if not state.values:
+            return []
+
+        # Get all messages and apply context window
+        all_messages = self.__process_messages(state.values["messages"])
+        windowed_messages = trim_messages_by_count(all_messages, settings.CONTEXT_WINDOW_SIZE)
+
+        return windowed_messages
 
     def __process_messages(self, messages: list[BaseMessage]) -> list[Message]:
         openai_style_messages = convert_to_openai_messages(messages)
@@ -392,16 +550,39 @@ class LangGraphAgent:
             # Make sure the pool is initialized in the current event loop
             conn_pool = await self._get_connection_pool()
 
-            # Use a new connection for this specific operation
-            async with conn_pool.connection() as conn:
-                for table in settings.CHECKPOINT_TABLES:
-                    try:
-                        await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
-                        logger.info(f"Cleared {table} for session {session_id}")
-                    except Exception as e:
-                        logger.error(f"Error clearing {table}", error=str(e))
-                        raise
+            if conn_pool is None:
+                logger.warning(
+                    "no_connection_pool", session_id=session_id, message="Cannot clear history without connection pool"
+                )
+                return
+
+            # Use a connection with timeout and retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with conn_pool.connection() as conn:
+                        for table in settings.CHECKPOINT_TABLES:
+                            try:
+                                await conn.execute(f"DELETE FROM {table} WHERE thread_id = %s", (session_id,))
+                                logger.info(f"Cleared {table} for session {session_id}")
+                            except Exception as table_error:
+                                logger.error(f"Error clearing {table}", error=str(table_error), session_id=session_id)
+                                raise table_error
+                    break  # Success, exit retry loop
+
+                except Exception as conn_error:
+                    logger.warning(
+                        "connection_retry",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        error=str(conn_error),
+                        session_id=session_id,
+                    )
+                    if attempt == max_retries - 1:
+                        raise conn_error
+                    # Wait before retry with exponential backoff
+                    await asyncio.sleep(2**attempt)
 
         except Exception as e:
-            logger.error("Failed to clear chat history", error=str(e))
+            logger.error("Failed to clear chat history", error=str(e), session_id=session_id)
             raise

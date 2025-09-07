@@ -58,6 +58,18 @@ make eval ENV=development
 make eval-quick ENV=development
 ```
 
+### Chatwoot Integration
+```bash
+# Test Chatwoot integration health
+curl http://localhost:8000/api/v1/chatwoot/health
+
+# View Chatwoot configuration
+curl http://localhost:8000/api/v1/chatwoot/config
+
+# Webhook endpoint for Chatwoot
+# POST http://localhost:8000/api/v1/chatwoot/webhook
+```
+
 ## Architecture Overview
 
 ### Core Components
@@ -94,6 +106,13 @@ make eval-quick ENV=development
    - Langfuse integration for LLM tracing
    - Structured logging with environment-specific formatting
 
+7. **Chatwoot Integration** (`app/api/v1/chatwoot.py`, `app/services/chatwoot.py`)
+   - Webhook authentication with HMAC signature validation
+   - Bidirectional message flow between Chatwoot and LangGraph agent
+   - Session management using Chatwoot conversation/contact IDs
+   - Comprehensive error handling and retry logic
+   - Prometheus metrics for webhook processing and API calls
+
 ### Key Design Patterns
 
 - **Async/Await Throughout**: All database operations and LLM calls are async
@@ -120,6 +139,7 @@ Tools are defined in `app/core/langgraph/tools/` and automatically bound to the 
 All API endpoints follow `/api/v1/` prefix:
 - `/auth/*`: Authentication endpoints (register, login, logout)
 - `/chatbot/*`: Chat interaction endpoints (chat, stream, messages, history)
+- `/chatwoot/*`: Chatwoot webhook and integration endpoints
 
 ### Environment Variables
 
@@ -129,5 +149,13 @@ Critical environment variables that must be set:
 - `POSTGRES_URL`: PostgreSQL connection string
 - `JWT_SECRET_KEY`: Secret for JWT signing
 - `LANGFUSE_PUBLIC_KEY` & `LANGFUSE_SECRET_KEY`: For LLM observability
+
+Chatwoot integration variables (optional):
+- `CHATWOOT_ENABLED`: Enable/disable Chatwoot integration
+- `CHATWOOT_BASE_URL`: Chatwoot instance URL
+- `CHATWOOT_API_ACCESS_TOKEN`: API token for Chatwoot
+- `CHATWOOT_ACCOUNT_ID`: Chatwoot account ID
+- `CHATWOOT_TIMEOUT`: Request timeout in seconds (default: 30)
+- `CHATWOOT_MAX_RETRIES`: Maximum API retry attempts (default: 3)
 
 See `.env.example` for complete list and defaults.

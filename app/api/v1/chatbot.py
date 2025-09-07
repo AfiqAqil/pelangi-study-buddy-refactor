@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from app.core.metrics import llm_stream_duration_seconds
 from app.api.v1.auth import get_current_session
 from app.core.config import settings
-from app.core.langgraph.graph import LangGraphAgent
+from app.services.agent import agent_service
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.models.session import Session
@@ -29,8 +29,6 @@ from app.schemas.chat import (
 )
 
 router = APIRouter()
-agent = LangGraphAgent()
-
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -60,15 +58,12 @@ async def chat(
             message_count=len(chat_request.messages),
         )
 
-       
-
-        result = await agent.get_response(
-            chat_request.messages, session.id, user_id=session.user_id
-        )
+        agent = agent_service.get_agent()
+        result = await agent.get_response(chat_request.messages, session.id, user_id=session.user_id)
 
         logger.info("chat_request_processed", session_id=session.id)
 
-        return ChatResponse(messages=result)
+        return ChatResponse(messages=result["messages"])
     except Exception as e:
         logger.error("chat_request_failed", session_id=session.id, error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -111,11 +106,14 @@ async def chat_stream(
                 Exception: If there's an error during streaming.
             """
             try:
+                agent = agent_service.get_agent()
                 full_response = ""
-                with llm_stream_duration_seconds.labels(model=agent.llm.model_name).time():
+                # Use the centralized method to get model name
+                model_name = agent.get_model_name()
+                with llm_stream_duration_seconds.labels(model=model_name).time():
                     async for chunk in agent.get_stream_response(
                         chat_request.messages, session.id, user_id=session.user_id
-                     ):
+                    ):
                         full_response += chunk
                         response = StreamResponse(content=chunk, done=False)
                         yield f"data: {json.dumps(response.model_dump())}\n\n"
@@ -165,6 +163,7 @@ async def get_session_messages(
         HTTPException: If there's an error retrieving the messages.
     """
     try:
+        agent = agent_service.get_agent()
         messages = await agent.get_chat_history(session.id)
         return ChatResponse(messages=messages)
     except Exception as e:
@@ -188,6 +187,7 @@ async def clear_chat_history(
         dict: A message indicating the chat history was cleared.
     """
     try:
+        agent = agent_service.get_agent()
         await agent.clear_chat_history(session.id)
         return {"message": "Chat history cleared successfully"}
     except Exception as e:
