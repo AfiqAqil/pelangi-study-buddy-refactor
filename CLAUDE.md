@@ -58,6 +58,24 @@ make eval ENV=development
 make eval-quick ENV=development
 ```
 
+### RAG System Operations
+```bash
+# Test RAG system health
+curl http://localhost:8000/api/v1/questions/health
+
+# Ask educational questions via API
+curl -X POST "http://localhost:8000/api/v1/questions/ask" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is photosynthesis?", "language": "en"}'
+
+# Search for documents
+curl -X POST "http://localhost:8000/api/v1/questions/search" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "cellular respiration", "top_k": 5}'
+```
+
 ### Chatwoot Integration
 ```bash
 # Test Chatwoot integration health
@@ -132,6 +150,11 @@ The application uses SQLModel ORM with these core tables:
 
 Tools are defined in `app/core/langgraph/tools/` and automatically bound to the LLM:
 - DuckDuckGo search tool for web queries
+- Subject selection tools for educational content
+- Simplified RAG tools for document retrieval and answer generation (when RAG_ENABLED=true)
+  - `qdrant_retriever`: Document search
+  - `generate_rag_answer`: Answer generation
+  - `comprehensive_rag_search`: Full RAG pipeline
 - Extensible architecture for adding new tools
 
 ### API Structure
@@ -140,6 +163,8 @@ All API endpoints follow `/api/v1/` prefix:
 - `/auth/*`: Authentication endpoints (register, login, logout)
 - `/chatbot/*`: Chat interaction endpoints (chat, stream, messages, history)
 - `/chatwoot/*`: Chatwoot webhook and integration endpoints
+- `/subjects/*`: Subject management endpoints (list, select, context)
+- `/questions/*`: RAG-powered question answering and document search endpoints
 
 ### Environment Variables
 
@@ -158,4 +183,16 @@ Chatwoot integration variables (optional):
 - `CHATWOOT_TIMEOUT`: Request timeout in seconds (default: 30)
 - `CHATWOOT_MAX_RETRIES`: Maximum API retry attempts (default: 3)
 
-See `.env.example` for complete list and defaults.
+Simplified RAG system variables (optional):
+- `RAG_ENABLED`: Enable/disable RAG system (default: false)
+- `HF_EMBED`: Hugging Face embedding model (default: Qwen/Qwen3-Embedding-0.6B)
+- `QDRANT_URL`: Qdrant vector database URL
+- `QDRANT_KEY`: Qdrant API key
+- `QDRANT_COLLECTION`: Vector collection name (default: test_5)
+- `GEMINI_KEY`: Gemini API key for LLM
+- `GEMINI_MODEL`: Gemini model name (default: gemini-2.0-flash-exp)
+- `RAG_SIMILARITY_CUTOFF`: Minimum similarity score (default: 0.70)
+- `RAG_SIMILARITY_TOP_K`: Number of results to retrieve (default: 20)
+- `RAG_RERANKED_TOP_N`: Max documents for context (default: 6)
+
+The RAG system now uses a simplified architecture with a single service layer.

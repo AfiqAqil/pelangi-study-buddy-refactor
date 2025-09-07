@@ -214,6 +214,9 @@ class Settings:
         self.CHATWOOT_MAX_RETRIES = int(
             os.getenv("CHATWOOT_MAX_RETRIES", "1")
         )  # Optimized: Reduced to 1 retry for faster response
+        
+        # Image attachments are always enabled with fixed limits
+        # No configuration needed - always active
 
         # Redis Configuration
         self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")
@@ -232,6 +235,28 @@ class Settings:
         self.CACHE_MESSAGE_COUNT_TTL = int(os.getenv("CACHE_MESSAGE_COUNT_TTL", "600"))  # Increased to 10 minutes
         self.CACHE_CONVERSATION_TTL = int(os.getenv("CACHE_CONVERSATION_TTL", "1800"))  # 30 minutes
         self.CACHE_CONTACT_TTL = int(os.getenv("CACHE_CONTACT_TTL", "3600"))  # 1 hour
+
+        # RAG System Configuration
+        self.RAG_ENABLED = os.getenv("RAG_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+        
+        # Embedding Model Configuration
+        self.HF_EMBED = os.getenv("HF_EMBED", "Qwen/Qwen3-Embedding-0.6B")
+        
+        # Qdrant Vector Database Configuration
+        self.QDRANT_URL = os.getenv("QDRANT_URL", "")
+        self.QDRANT_KEY = os.getenv("QDRANT_KEY", "")
+        self.QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+        self.QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "test_5")
+        
+        # Gemini LLM Configuration (for RAG)
+        self.GEMINI_KEY = os.getenv("GEMINI_KEY", "")
+        self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        
+        # RAG Performance Settings
+        self.RAG_SIMILARITY_CUTOFF = float(os.getenv("RAG_SIMILARITY_CUTOFF", "0.70"))
+        self.RAG_SIMILARITY_TOP_K = int(os.getenv("RAG_SIMILARITY_TOP_K", "20"))
+        self.RAG_RERANKED_TOP_N = int(os.getenv("RAG_RERANKED_TOP_N", "6"))
+        
 
         # Apply environment-specific settings
         self.apply_environment_settings()

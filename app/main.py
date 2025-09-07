@@ -66,6 +66,40 @@ async def lifespan(app: FastAPI):
             # In non-production environments, we might want to know about Redis issues
             logger.warning("continuing_without_redis", message="Application will continue without Redis caching")
 
+    # Initialize RAG system if enabled
+    if settings.RAG_ENABLED:
+        try:
+            logger.info("rag_system_initialization_starting")
+            from app.core.rag.service import get_rag_service
+            from app.core.rag.model_manager import get_model_manager
+            from app.core.rag.vector_store import get_vector_store
+            
+            # Initialize RAG components eagerly
+            rag_service = get_rag_service()
+            model_manager = get_model_manager()
+            vector_store = await get_vector_store()
+            
+            # Pre-load models to avoid first-request delays
+            embedding_model = model_manager.get_embedding_model()
+            llm_model = model_manager.get_llm_model()
+            
+            # Test connectivity
+            connection_test = await vector_store.test_connection()
+            
+            logger.info(
+                "rag_system_initialized",
+                embedding_model=settings.HF_EMBED,
+                llm_model=settings.GEMINI_MODEL,
+                vector_store_connected=connection_test,
+                collection=settings.QDRANT_COLLECTION,
+            )
+        except Exception as e:
+            logger.error("rag_system_initialization_failed", error=str(e))
+            if settings.ENVIRONMENT.value != "production":
+                logger.warning("continuing_without_rag", message="Application will continue without RAG functionality")
+    else:
+        logger.info("rag_system_skipped", reason="RAG_ENABLED=false")
+    
     # Initialize webhook worker pool if Chatwoot is enabled and Redis is available
     if settings.CHATWOOT_ENABLED and redis_service.is_available():
         try:

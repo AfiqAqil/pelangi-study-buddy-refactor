@@ -80,6 +80,86 @@ class LangGraphAgent:
         # Use the provider's centralized method
         return self.llm_provider.get_model_name()
 
+    def _detect_language(self, messages: list[str]) -> str:
+        """Detect language from recent user messages.
+        
+        Args:
+            messages: List of recent message contents
+            
+        Returns:
+            str: Detected language code (en, ms, zh)
+        """
+        combined_text = " ".join(messages)
+        
+        # Simple language detection based on character patterns
+        if not combined_text:
+            return "en"  # Default to English
+        
+        # Check for Chinese characters
+        chinese_chars = sum(1 for char in combined_text if '\u4e00' <= char <= '\u9fff')
+        if chinese_chars > len(combined_text) * 0.1:  # 10% threshold
+            return "zh"
+        
+        # Check for Malay/Indonesian indicators (common words and patterns)
+        malay_indicators = [
+            'adalah', 'dengan', 'yang', 'untuk', 'dalam', 'pada', 'atau', 'juga', 
+            'akan', 'telah', 'sudah', 'belum', 'tidak', 'bukan', 'saya', 'anda',
+            'kita', 'mereka', 'dia', 'ini', 'itu', 'bagaimana', 'mengapa', 'apa'
+        ]
+        
+        words = combined_text.lower().split()
+        malay_word_count = sum(1 for word in words if word in malay_indicators)
+        
+        if len(words) > 0 and malay_word_count / len(words) > 0.15:  # 15% threshold
+            return "ms"
+        
+        return "en"  # Default to English
+    
+    def _create_rag_aware_prompt(self, state: GraphState) -> str:
+        """Create an enhanced system prompt with RAG enforcement hints.
+        
+        Args:
+            state: Current graph state
+            
+        Returns:
+            str: Enhanced system prompt
+        """
+        base_prompt = SYSTEM_PROMPT
+        
+        # Add RAG hints if RAG is enabled
+        if settings.RAG_ENABLED:
+            try:
+                from app.core.rag.classifier import classify_content, ContentType
+                
+                # Get subject context
+                subject_context = state.metadata.get("subject_context", {}) if state.metadata else {}
+                
+                # Get recent user messages for content classification
+                user_messages = [msg for msg in state.messages if hasattr(msg, 'role') and msg.role == "user"]
+                if user_messages:
+                    last_user_message = user_messages[-1].content if hasattr(user_messages[-1], 'content') else ""
+                    
+                    # Classify content type
+                    content_type = classify_content(last_user_message, subject_context)
+                    
+                    # Add educational content hint
+                    if content_type == ContentType.EDUCATIONAL:
+                        hint = "\n🎯 EDUCATIONAL CONTENT DETECTED: Use RAG tools (comprehensive_rag_search, generate_rag_answer, or qdrant_retriever) to provide textbook-based answers."
+                        base_prompt += hint
+                        
+                        logger.debug(
+                            "rag_hint_added_to_prompt",
+                            content_type=content_type.value,
+                            session_id=state.session_id
+                        )
+                
+            except ImportError:
+                logger.debug("rag_classifier_not_available_for_prompt")
+            except Exception as e:
+                logger.error("rag_prompt_enhancement_failed", error=str(e))
+        
+        return base_prompt
+
     async def get_message_count_async(self, session_id: str) -> int:
         """Get message count using native async query.
 
@@ -98,16 +178,18 @@ class LangGraphAgent:
             async with connection_pool.connection() as conn:
                 # Query the LangGraph checkpoint tables directly
                 # Use parameterized query to prevent SQL injection
-                result = await conn.fetchval(
-                    """
-                    SELECT COUNT(*) 
-                    FROM checkpoint_writes 
-                    WHERE thread_id = $1 
-                    AND channel = 'messages'
-                    """,
-                    session_id,
-                )
-                return result or 0
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT COUNT(*) 
+                        FROM checkpoint_writes 
+                        WHERE thread_id = %s 
+                        AND channel = 'messages'
+                        """,
+                        (session_id,),
+                    )
+                    result = await cur.fetchone()
+                    return result[0] if result else 0
         except Exception as e:
             logger.error("async_message_count_failed", session_id=session_id, error=str(e))
             return 0
@@ -179,7 +261,12 @@ class LangGraphAgent:
         Returns:
             dict: Updated state with new messages.
         """
-        messages = prepare_messages(state.messages, self.llm, SYSTEM_PROMPT)
+        # Note: RAG enforcement is now handled through tool selection in LLM response
+        # The simplified architecture lets the LLM decide when to use RAG tools based on prompts
+        
+        # Prepare messages with enhanced system prompt for RAG awareness
+        enhanced_system_prompt = self._create_rag_aware_prompt(state)
+        messages = prepare_messages(state.messages, self.llm, enhanced_system_prompt)
 
         llm_calls_num = 0
 
@@ -243,7 +330,7 @@ class LangGraphAgent:
                 # Prepare tool arguments with metadata injection
                 tool_args = tool_call["args"].copy()
 
-                # Inject user_id for tools that require it
+                # Inject user_id and context for tools that require it
                 tool_name = tool_call["name"]
                 if tool_name in ["select_subject", "get_subject_context"]:
                     # Get user_id from state metadata
@@ -258,6 +345,47 @@ class LangGraphAgent:
                         )
                     else:
                         logger.warning("missing_user_id_for_tool", tool_name=tool_name, session_id=state.session_id)
+                
+                # Inject context for RAG tools
+                elif tool_name in ["qdrant_retriever", "generate_rag_answer", "comprehensive_rag_search"]:
+                    # Get subject context from state metadata
+                    subject_context = state.metadata.get("subject_context", {}) if state.metadata else {}
+                    book_code = subject_context.get("book_code")
+                    
+                    # Inject book_code if available and not already specified
+                    if book_code and "book_code" not in tool_args:
+                        tool_args["book_code"] = book_code
+                        logger.debug(
+                            "injected_book_code_to_rag_tool",
+                            tool_name=tool_name,
+                            book_code=book_code,
+                            session_id=state.session_id,
+                        )
+                    
+                    # Inject session_id for comprehensive_rag_search to enable memory
+                    if tool_name == "comprehensive_rag_search" and "session_id" not in tool_args:
+                        tool_args["session_id"] = state.session_id
+                        logger.debug(
+                            "injected_session_id_to_rag_tool",
+                            tool_name=tool_name,
+                            session_id=state.session_id,
+                        )
+                    
+                    # Auto-detect language if not specified
+                    if "language" not in tool_args:
+                        # Simple language detection based on recent messages
+                        recent_user_messages = [
+                            msg.content for msg in state.messages[-3:] 
+                            if hasattr(msg, 'content') and msg.content
+                        ]
+                        language = self._detect_language(recent_user_messages)
+                        tool_args["language"] = language
+                        logger.debug(
+                            "injected_language_to_rag_tool",
+                            tool_name=tool_name,
+                            language=language,
+                            session_id=state.session_id,
+                        )
 
                 # Execute the tool with enhanced arguments
                 tool_result = await self.tools_by_name[tool_name].ainvoke(tool_args)
@@ -519,7 +647,10 @@ class LangGraphAgent:
             self._graph = await self.create_graph()
 
         try:
-            async for token, _ in self._graph.astream(
+            seen_tool_calls = False
+            tool_execution_complete = False
+            
+            async for token, metadata in self._graph.astream(
                 {
                     "messages": dump_messages(messages),
                     "session_id": session_id,
@@ -529,10 +660,32 @@ class LangGraphAgent:
                 stream_mode="messages",
             ):
                 try:
-                    yield token.content
+                    # Track if we've seen tool calls (indicating RAG usage)
+                    if hasattr(token, 'tool_calls') and token.tool_calls:
+                        seen_tool_calls = True
+                        continue  # Skip tool call messages
+                    
+                    # Skip tool response messages
+                    if hasattr(token, 'type') and token.type == 'tool':
+                        tool_execution_complete = True
+                        continue
+                    
+                    # Only yield AI responses
+                    if hasattr(token, 'type') and token.type == 'ai' and hasattr(token, 'content') and token.content:
+                        # If we've seen tool calls, only yield the response after tools are complete
+                        if seen_tool_calls and not tool_execution_complete:
+                            continue  # Skip intermediate AI messages before tool execution
+                        yield token.content
+                    elif hasattr(token, 'content') and token.content:
+                        # Handle messages without explicit type, but exclude tool-related ones
+                        if not (hasattr(token, 'tool_calls') and token.tool_calls):
+                            # Apply same filtering logic for non-typed messages
+                            if seen_tool_calls and not tool_execution_complete:
+                                continue
+                            yield token.content
+                            
                 except Exception as token_error:
                     logger.error("Error processing token", error=str(token_error), session_id=session_id)
-                    # Continue with next token even if current one fails
                     continue
         except Exception as stream_error:
             logger.error("Error in stream processing", error=str(stream_error), session_id=session_id)

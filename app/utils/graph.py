@@ -76,7 +76,7 @@ def trim_messages_by_count(messages: list, context_window_size: int) -> list:
 
 
 def prepare_messages(messages: list, llm: BaseChatModel, system_prompt: str) -> list:
-    """Prepare the messages for the LLM with context window trimming.
+    """Prepare the messages for the LLM with context window trimming and sequence validation.
 
     Args:
         messages (list): The messages to prepare (can be Message objects or LangChain BaseMessage objects).
@@ -94,5 +94,70 @@ def prepare_messages(messages: list, llm: BaseChatModel, system_prompt: str) -> 
 
     # Remove any existing system messages and add our system prompt at the beginning
     non_system_messages = [msg for msg in windowed_messages if get_message_role(msg) != "system"]
+    
+    # Validate and fix message sequence for LLM compatibility (especially Gemini)
+    cleaned_messages = _validate_message_sequence(non_system_messages)
 
-    return [system_message] + non_system_messages
+    return [system_message] + cleaned_messages
+
+
+def _validate_message_sequence(messages: list) -> list:
+    """Validate and fix message sequence to ensure LLM compatibility.
+    
+    Ensures that:
+    1. Assistant messages with tool_calls are followed by tool messages
+    2. Tool messages are followed by assistant messages
+    3. No incomplete tool call sequences are sent to the LLM
+    
+    Args:
+        messages (list): The messages to validate
+        
+    Returns:
+        list: Cleaned message sequence safe for LLM processing
+    """
+    if not messages:
+        return messages
+        
+    cleaned = []
+    i = 0
+    
+    while i < len(messages):
+        current_msg = messages[i]
+        current_role = get_message_role(current_msg)
+        
+        # If this is an assistant message with tool calls
+        if (current_role == "assistant" and 
+            hasattr(current_msg, 'tool_calls') and 
+            current_msg.tool_calls):
+            
+            # Look ahead to see if there are corresponding tool responses
+            tool_call_ids = [tc.get('id') if isinstance(tc, dict) else tc['id'] 
+                           for tc in current_msg.tool_calls]
+            
+            # Find all consecutive tool messages that respond to these calls
+            j = i + 1
+            found_tool_responses = []
+            
+            while (j < len(messages) and 
+                   get_message_role(messages[j]) == "tool"):
+                tool_msg = messages[j]
+                if (hasattr(tool_msg, 'tool_call_id') and 
+                    tool_msg.tool_call_id in tool_call_ids):
+                    found_tool_responses.append(tool_msg)
+                j += 1
+            
+            # If we found complete tool responses, include the sequence
+            if len(found_tool_responses) == len(tool_call_ids):
+                cleaned.append(current_msg)
+                cleaned.extend(found_tool_responses)
+                i = j
+            else:
+                # Incomplete tool call sequence - skip the assistant message with tool calls
+                # This prevents sending invalid sequences to the LLM
+                i += 1
+        else:
+            # Regular message (user, assistant without tools, etc.)
+            cleaned.append(current_msg)
+            i += 1
+    
+    return cleaned

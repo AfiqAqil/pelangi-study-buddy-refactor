@@ -21,6 +21,7 @@ from app.schemas.chatwoot import (
     ChatwootConversation,
     ChatwootContact,
     ChatwootMessage,
+    ChatwootAttachment,
 )
 
 
@@ -317,6 +318,175 @@ class ChatwootService:
         except Exception as e:
             logger.error("chatwoot_send_message_failed", conversation_id=conversation_id, error=str(e))
             raise ChatwootServiceError(f"Failed to send message: {str(e)}")
+
+    async def send_message_with_images(
+        self,
+        conversation_id: int,
+        text_content: str,
+        image_data: List[Dict[str, Any]],
+        private: bool = False,
+    ) -> List[ChatwootApiResponse]:
+        """Send a text message followed by image attachments.
+        
+        Args:
+            conversation_id: The Chatwoot conversation ID
+            text_content: The main text content
+            image_data: List of image data with URLs and metadata
+            private: Whether messages should be private notes
+            
+        Returns:
+            List[ChatwootApiResponse]: Responses for all sent messages
+            
+        Raises:
+            ChatwootServiceError: If sending messages fails
+        """
+        # Images are always enabled - no configuration check needed
+        
+        responses = []
+        
+        try:
+            # Send main text message first
+            text_message = ChatwootApiMessage(
+                content=text_content,
+                private=private
+            )
+            text_response = await self.send_message(conversation_id, text_message)
+            responses.append(text_response)
+            
+            # Process and send images
+            if image_data:
+                # Limit number of images (fixed at 3)
+                limited_images = image_data[:3]
+                
+                logger.debug(
+                    "sending_image_attachments",
+                    conversation_id=conversation_id,
+                    total_images=len(image_data),
+                    sending_images=len(limited_images),
+                )
+                
+                for i, image_info in enumerate(limited_images):
+                    try:
+                        # Add small delay between image messages to avoid rate limiting
+                        if i > 0:
+                            await asyncio.sleep(0.5)  # Fixed 0.5 second delay
+                        
+                        # Validate image URL
+                        image_url = image_info.get("url", "")
+                        if not image_url or not self._is_valid_image_url(image_url):
+                            logger.warning(
+                                "invalid_image_url_skipped",
+                                conversation_id=conversation_id,
+                                url=image_url,
+                                image_index=i,
+                            )
+                            continue
+                        
+                        # Create image message
+                        image_caption = self._create_image_caption(image_info)
+                        image_message = ChatwootApiMessage(
+                            content=image_caption,
+                            private=private,
+                            attachments=[
+                                ChatwootAttachment(
+                                    external_url=image_url,
+                                    file_type="image",
+                                    fallback_text=image_info.get("description", "Educational diagram"),
+                                )
+                            ]
+                        )
+                        
+                        image_response = await self.send_message(conversation_id, image_message)
+                        responses.append(image_response)
+                        
+                    except Exception as image_error:
+                        logger.error(
+                            "image_attachment_send_failed",
+                            conversation_id=conversation_id,
+                            image_index=i,
+                            error=str(image_error),
+                        )
+                        # Continue with other images even if one fails
+                        continue
+            
+            logger.info(
+                "message_with_images_sent",
+                conversation_id=conversation_id,
+                total_messages=len(responses),
+                images_sent=len(responses) - 1,
+            )
+            
+            return responses
+            
+        except Exception as e:
+            logger.error(
+                "send_message_with_images_failed",
+                conversation_id=conversation_id,
+                error=str(e),
+            )
+            raise ChatwootServiceError(f"Failed to send message with images: {str(e)}")
+    
+    def _is_valid_image_url(self, url: str) -> bool:
+        """Validate if the URL is a valid image URL.
+        
+        Args:
+            url: Image URL to validate
+            
+        Returns:
+            bool: True if URL appears to be a valid image
+        """
+        if not url or not isinstance(url, str):
+            return False
+        
+        # Check if URL starts with http/https
+        if not url.startswith(("http://", "https://")):
+            return False
+        
+        # Check for common image extensions
+        image_extensions = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"]
+        url_lower = url.lower()
+        
+        # Check extension in URL path
+        for ext in image_extensions:
+            if ext in url_lower:
+                return True
+        
+        # If no extension found, assume it might be a valid image URL
+        # (some services serve images without file extensions)
+        return True
+    
+    def _create_image_caption(self, image_info: Dict[str, Any]) -> str:
+        """Create a caption for an image attachment.
+        
+        Args:
+            image_info: Image metadata
+            
+        Returns:
+            str: Caption text for the image
+        """
+        parts = []
+        
+        # Add description if available
+        description = image_info.get("description", "")
+        if description:
+            parts.append(f"📸 {description}")
+        else:
+            parts.append("📸 Educational diagram")
+        
+        # Add source information
+        source = image_info.get("source", "")
+        page = image_info.get("page")
+        if source and page:
+            parts.append(f"(Source: {source}, Page {page})")
+        elif source:
+            parts.append(f"(Source: {source})")
+        
+        # Add spatial relationship if available
+        relationship = image_info.get("spatial_relationship", "")
+        if relationship and relationship != "adjacent":
+            parts.append(f"[{relationship.title()} related content]")
+        
+        return " ".join(parts)
 
     async def get_conversation(self, conversation_id: int) -> Optional[ChatwootConversation]:
         """Get conversation details from Chatwoot.
