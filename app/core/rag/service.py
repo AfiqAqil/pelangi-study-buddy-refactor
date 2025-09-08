@@ -1,11 +1,13 @@
 """Simplified RAG service for educational content retrieval and generation."""
 
+import json
 import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.utils.prompt_utils import get_prompt_template, format_prompt
 
 
 class RAGService:
@@ -160,7 +162,7 @@ class RAGService:
             # Use top documents for context
             max_docs = min(len(documents), settings.RAG_RERANKED_TOP_N or 5)
             for i, doc in enumerate(documents[:max_docs]):
-                text = doc.get("text", "")
+                text = json.loads(doc['payload']['_node_content']).get('text')
                 source = doc.get("source", "")
                 page_num = doc.get("page_num", "")
                 score = doc.get("score", 0.0)
@@ -177,21 +179,26 @@ class RAGService:
             # Create context
             context = "\n\n".join(context_parts)
             
-            # Generate multilingual prompt
-            language_prompts = {
-                "en": f"Based on the following educational content, answer the question: {query}\n\nContext:\n{context}",
-                "ms": f"Berdasarkan kandungan pendidikan berikut, jawab soalan: {query}\n\nKonteks:\n{context}",
-                "zh": f"根据以下教育内容，回答问题：{query}\n\n上下文：\n{context}"
-            }
-            
-            prompt = language_prompts.get(language, language_prompts["en"])
+            # Get language-specific prompt template and format it
+            template = get_prompt_template('rag_prompts.yaml', 'rag_prompts', language)
+            formatted_prompt = format_prompt(template, query=query, context=context)
             
             # Generate response
             model_manager = self._get_model_manager()
             llm_model = model_manager.get_llm_model()
             
-            response = await llm_model.acomplete(prompt)
+            response = await llm_model.acomplete(formatted_prompt)
             
+            logger.info(
+                "rag_answer_generated",
+                query=query[:100],
+                prompt=formatted_prompt,
+                answer_length=len(response.text),
+                citations_count=len(citations),
+                language=language,
+                response=response.text
+            )
+
             result = {
                 "answer": response.text,
                 "citations": citations,
