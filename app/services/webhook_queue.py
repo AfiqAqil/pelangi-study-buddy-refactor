@@ -2,14 +2,13 @@
 
 import json
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
 from app.services.redis import redis_service
 from app.core.logging import logger
 from app.core.metrics import (
     chatwoot_webhooks_total,
-    chatwoot_message_processing_duration_seconds,
 )
 
 
@@ -19,8 +18,10 @@ class WebhookQueueService:
     QUEUE_KEY = "chatwoot:webhook:queue"
     PROCESSING_KEY = "chatwoot:webhook:processing"
     FAILED_KEY = "chatwoot:webhook:failed"
+    PROCESSED_KEY = "chatwoot:webhook:processed"  # Track processed message IDs
     MAX_RETRY_COUNT = 3
     PROCESSING_TIMEOUT = 60  # seconds
+    DEDUP_TTL = 300  # 5 minutes TTL for processed message tracking
 
     def __init__(self):
         """Initialize the webhook queue service."""
@@ -28,33 +29,54 @@ class WebhookQueueService:
         self._processing_lock = asyncio.Lock()
 
     async def enqueue(self, webhook_data: Dict[str, Any]) -> bool:
-        """Add a webhook to the processing queue.
+        """Add a webhook to the processing queue with deduplication.
 
         Args:
             webhook_data: The webhook payload to process
 
         Returns:
-            True if successfully queued
+            True if successfully queued, False if already processed or error
         """
         try:
-            # Add timestamp and retry count
-            queue_item = {
-                "data": webhook_data,
-                "timestamp": datetime.utcnow().isoformat(),
-                "retry_count": 0,
-                "id": f"{webhook_data.get('id', '')}_{datetime.utcnow().timestamp()}",
-            }
-
-            # Use Redis list as queue (RPUSH for enqueue)
+            message_id = webhook_data.get("id")
+            if not message_id:
+                logger.error("webhook_missing_message_id")
+                return False
+                
+            # Check if message was recently processed (deduplication)
             async with self.redis.get_client() as client:
                 if client:
+                    # Check if message was already processed
+                    dedup_key = f"{self.PROCESSED_KEY}:{message_id}"
+                    already_processed = await client.exists(dedup_key)
+                    
+                    if already_processed:
+                        logger.info(
+                            "webhook_duplicate_skipped",
+                            message_id=message_id,
+                            event_type=webhook_data.get("event", "unknown"),
+                        )
+                        return False  # Skip duplicate
+                    
+                    # Add timestamp and retry count
+                    queue_item = {
+                        "data": webhook_data,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "retry_count": 0,
+                        "id": f"{message_id}_{datetime.utcnow().timestamp()}",
+                    }
+
+                    # Use Redis list as queue (RPUSH for enqueue)
                     await client.rpush(self.QUEUE_KEY, json.dumps(queue_item))
+                    
+                    # Mark as being processed with TTL
+                    await client.setex(dedup_key, self.DEDUP_TTL, "processing")
 
                     # Track metrics
                     event_type = webhook_data.get("event", "unknown")
                     chatwoot_webhooks_total.labels(event_type=event_type, status="queued").inc()
 
-                    logger.debug("webhook_queued", webhook_id=webhook_data.get("id"), event_type=event_type)
+                    logger.debug("webhook_queued", webhook_id=message_id, event_type=event_type)
                     return True
                 else:
                     logger.error("webhook_queue_redis_unavailable")

@@ -1,6 +1,5 @@
 """Simple phone-based user identification service for Chatwoot integration."""
 
-from datetime import datetime
 from typing import Optional
 from sqlmodel import Session, select
 
@@ -66,10 +65,10 @@ class UserIdentificationService:
 
         try:
             import uuid
-            
+
             # Generate external_id for WhatsApp users
             external_id = f"whatsapp_{uuid.uuid4().hex[:12]}"
-            
+
             with Session(self.db_service.engine) as session:
                 new_user = User(
                     email=email,
@@ -77,7 +76,7 @@ class UserIdentificationService:
                     hashed_password=hashed_password,
                     external_id=external_id,
                     channel="whatsapp",
-                    tier="FREE"  # Default tier
+                    tier="FREE",  # Default tier
                 )
 
                 session.add(new_user)
@@ -140,14 +139,14 @@ class UserIdentificationService:
             contact_phone=contact.phone,
             contact_identifier=contact.identifier,
         )
-        
+
         # First check if the contact already has a valid phone
         if contact.phone:
             normalized = User.normalize_phone(contact.phone)
             if normalized and User.is_valid_malaysian_phone(normalized):
                 logger.debug("phone_valid_in_contact_phone_field", contact_id=contact.id, phone=normalized)
                 return False
-        
+
         # Check for phone number in contact custom attributes (WhatsApp channels)
         phone_from_attributes = self._extract_phone_from_contact_attributes(contact)
         if phone_from_attributes:
@@ -155,7 +154,7 @@ class UserIdentificationService:
             contact.phone = phone_from_attributes
             logger.debug("phone_found_in_attributes", contact_id=contact.id, phone=phone_from_attributes)
             return False
-        
+
         # Check if the contact identifier is a phone number (WhatsApp channels)
         phone_from_identifier = self._extract_phone_from_identifier(contact)
         if phone_from_identifier:
@@ -163,7 +162,7 @@ class UserIdentificationService:
             contact.phone = phone_from_identifier
             logger.debug("phone_found_in_identifier", contact_id=contact.id, phone=phone_from_identifier)
             return False
-        
+
         # Check our stored mapping for this contact
         stored_phone = self.get_contact_phone_from_mapping(contact.id)
         if stored_phone:
@@ -171,7 +170,7 @@ class UserIdentificationService:
             contact.phone = stored_phone
             logger.debug("phone_found_in_mapping", contact_id=contact.id, phone=stored_phone)
             return False
-        
+
         logger.info("phone_number_required", contact_id=contact.id)
         return True
 
@@ -189,8 +188,8 @@ class UserIdentificationService:
         # Malaysian phone number patterns (more specific)
         patterns = [
             r"\+60[\d\s\-]{9,12}",  # +60123456789, +60 123 456 789, +60-123-456-789
-            r"60[\d\s\-]{9,12}",    # 60123456789, 60 123 456 789
-            r"0[\d\s\-]{9,11}",     # 0123456789, 012 345 6789, 012-345-6789
+            r"60[\d\s\-]{9,12}",  # 60123456789, 60 123 456 789
+            r"0[\d\s\-]{9,11}",  # 0123456789, 012 345 6789, 012-345-6789
             r"(?<!\d)1[\d\s\-]{8,9}(?!\d)",  # 123456789 (9-10 digits starting with 1, not part of longer number)
         ]
 
@@ -198,7 +197,7 @@ class UserIdentificationService:
             matches = re.findall(pattern, message)
             for match in matches:
                 # Remove spaces and dashes before normalizing
-                cleaned_match = re.sub(r'[\s\-]', '', match)
+                cleaned_match = re.sub(r"[\s\-]", "", match)
                 normalized = User.normalize_phone(cleaned_match)
                 if normalized and User.is_valid_malaysian_phone(normalized):
                     return normalized
@@ -207,83 +206,74 @@ class UserIdentificationService:
 
     def _extract_phone_from_contact_attributes(self, contact: ChatwootContact) -> Optional[str]:
         """Extract phone number from contact custom attributes.
-        
+
         Simple check for phone number in contact custom attributes.
-        
+
         Args:
             contact: Chatwoot contact data
-            
+
         Returns:
             Optional[str]: Normalized phone number if found and valid
         """
         if not contact.custom_attributes:
             return None
-        
+
         # Check for phone_number in custom attributes
-        if 'phone_number' in contact.custom_attributes:
-            phone_value = contact.custom_attributes['phone_number']
+        if "phone_number" in contact.custom_attributes:
+            phone_value = contact.custom_attributes["phone_number"]
             if isinstance(phone_value, str) and phone_value.strip():
                 normalized = User.normalize_phone(phone_value.strip())
                 if normalized and User.is_valid_malaysian_phone(normalized):
-                    logger.info(
-                        "phone_found_in_custom_attributes", 
-                        contact_id=contact.id, 
-                        phone=normalized
-                    )
+                    logger.info("phone_found_in_custom_attributes", contact_id=contact.id, phone=normalized)
                     return normalized
-        
+
         return None
 
     def _extract_phone_from_identifier(self, contact: ChatwootContact) -> Optional[str]:
         """Extract phone number from contact identifier.
-        
+
         WhatsApp and similar channels often use phone numbers as contact identifiers.
-        
+
         Args:
             contact: Chatwoot contact data
-            
+
         Returns:
             Optional[str]: Normalized phone number if found and valid
         """
         if not contact.identifier:
             return None
-        
+
         # Try to extract phone number from identifier
         # WhatsApp identifiers are often just phone numbers
         identifier = contact.identifier.strip()
-        
+
         # Try direct normalization first
         normalized = User.normalize_phone(identifier)
         if normalized and User.is_valid_malaysian_phone(normalized):
-            logger.info(
-                "phone_found_in_identifier", 
-                contact_id=contact.id, 
-                identifier=identifier, 
-                phone=normalized
-            )
+            logger.info("phone_found_in_identifier", contact_id=contact.id, identifier=identifier, phone=normalized)
             return normalized
-        
+
         # If direct normalization fails, try extracting phone patterns
         extracted = self.extract_phone_from_message(identifier)
         if extracted:
             logger.info(
-                "phone_extracted_from_identifier_pattern", 
-                contact_id=contact.id, 
-                identifier=identifier, 
-                phone=extracted
+                "phone_extracted_from_identifier_pattern",
+                contact_id=contact.id,
+                identifier=identifier,
+                phone=extracted,
             )
             return extracted
-        
+
         return None
 
     def extract_phone_from_webhook_meta(self, webhook_data: ChatwootMessageWebhook) -> Optional[str]:
         """Extract phone number from webhook conversation meta data.
-        
+
         WhatsApp channels store the phone number in conversation.meta.sender.phone_number
-        
+
         Args:
             webhook_data: Full Chatwoot webhook data
-            
+
         Returns:
             Optional[str]: Normalized phone number if found and valid
         """
@@ -292,32 +282,30 @@ class UserIdentificationService:
             meta = webhook_data.conversation.meta
             if not meta or not isinstance(meta, dict):
                 return None
-            
+
             # Look for sender information in meta
-            sender_meta = meta.get('sender')
+            sender_meta = meta.get("sender")
             if not sender_meta or not isinstance(sender_meta, dict):
                 return None
-            
+
             # Extract phone_number from sender meta
-            phone_value = sender_meta.get('phone_number')
+            phone_value = sender_meta.get("phone_number")
             if isinstance(phone_value, str) and phone_value.strip():
                 normalized = User.normalize_phone(phone_value.strip())
                 if normalized and User.is_valid_malaysian_phone(normalized):
                     logger.info(
-                        "phone_found_in_webhook_meta", 
-                        contact_id=webhook_data.sender.id, 
+                        "phone_found_in_webhook_meta",
+                        contact_id=webhook_data.sender.id,
                         conversation_id=webhook_data.conversation.id,
-                        phone=normalized
+                        phone=normalized,
                     )
                     return normalized
-                    
+
         except (AttributeError, KeyError, TypeError) as e:
             logger.debug(
-                "phone_extraction_from_meta_failed", 
-                conversation_id=webhook_data.conversation.id,
-                error=str(e)
+                "phone_extraction_from_meta_failed", conversation_id=webhook_data.conversation.id, error=str(e)
             )
-        
+
         return None
 
     def store_contact_phone_mapping(self, contact_id: int, phone: str) -> bool:
@@ -331,37 +319,34 @@ class UserIdentificationService:
             bool: True if mapping stored successfully
         """
         from app.models.chatwoot_contact_mapping import ChatwootContactMapping
-        
+
         normalized = User.normalize_phone(phone)
         if not normalized or not User.is_valid_malaysian_phone(normalized):
             return False
-        
+
         # Update cache immediately
         self._phone_cache[contact_id] = normalized
-        
+
         try:
             with Session(self.db_service.engine) as session:
                 # Check if mapping already exists
                 existing = session.exec(
                     select(ChatwootContactMapping).where(ChatwootContactMapping.contact_id == contact_id)
                 ).first()
-                
+
                 if existing:
                     # Update existing mapping
                     existing.phone = normalized
                     session.add(existing)
                 else:
                     # Create new mapping
-                    new_mapping = ChatwootContactMapping(
-                        contact_id=contact_id,
-                        phone=normalized
-                    )
+                    new_mapping = ChatwootContactMapping(contact_id=contact_id, phone=normalized)
                     session.add(new_mapping)
-                
+
                 session.commit()
                 logger.info("contact_phone_mapping_stored", contact_id=contact_id, phone=normalized)
                 return True
-                
+
         except Exception as e:
             # Remove from cache on failure
             self._phone_cache.pop(contact_id, None)
@@ -380,22 +365,22 @@ class UserIdentificationService:
         # Check cache first
         if contact_id in self._phone_cache:
             return self._phone_cache[contact_id]
-        
+
         from app.models.chatwoot_contact_mapping import ChatwootContactMapping
-        
+
         try:
             with Session(self.db_service.engine) as session:
                 mapping = session.exec(
                     select(ChatwootContactMapping).where(ChatwootContactMapping.contact_id == contact_id)
                 ).first()
-                
+
                 if mapping and mapping.phone:
                     # Update cache with database result
                     self._phone_cache[contact_id] = mapping.phone
                     return mapping.phone
-                
+
                 return None
-                
+
         except Exception as e:
             logger.error("contact_phone_mapping_get_failed", contact_id=contact_id, error=str(e))
             return None

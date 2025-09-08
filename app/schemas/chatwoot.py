@@ -133,6 +133,14 @@ class ChatwootConversationWebhook(ChatwootWebhookPayload):
     changed_attributes: Optional[List[str]] = Field(default=[], description="Changed conversation attributes")
 
 
+class ChatwootAttachment(BaseModel):
+    """Chatwoot message attachment."""
+    
+    external_url: str = Field(..., description="External URL of the attachment")
+    file_type: str = Field(default="image", description="Type of attachment (image, file, etc.)")
+    fallback_text: Optional[str] = Field(None, description="Fallback text for the attachment")
+
+
 class ChatwootApiMessage(BaseModel):
     """Chatwoot API message for sending responses."""
 
@@ -144,6 +152,7 @@ class ChatwootApiMessage(BaseModel):
     )
     content_attributes: Optional[Dict[str, Any]] = Field(default={}, description="Additional content attributes")
     template_params: Optional[Dict[str, Any]] = Field(default={}, description="Template parameters")
+    attachments: Optional[List[ChatwootAttachment]] = Field(default=None, description="Message attachments")
 
 
 class ChatwootApiResponse(BaseModel):

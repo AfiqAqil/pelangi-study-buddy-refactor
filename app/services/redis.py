@@ -2,10 +2,9 @@
 
 import json
 import asyncio
-from typing import Optional, Any, Dict, Union
+from typing import Optional, Any, Dict
 from contextlib import asynccontextmanager
 
-import redis.asyncio as redis
 from redis.asyncio import ConnectionPool, Redis
 
 from app.core.config import settings

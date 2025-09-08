@@ -77,18 +77,18 @@ class DatabaseService:
             User: The created user
         """
         import uuid
-        
+
         with Session(self.engine) as session:
             # Generate external_id (required field)
             external_id = f"{channel}_{uuid.uuid4().hex[:12]}"
-            
+
             user = User(
-                email=email, 
+                email=email,
                 hashed_password=password,
                 phone=phone,
                 external_id=external_id,
                 channel=channel,
-                tier="FREE"  # Default tier
+                tier="FREE",  # Default tier
             )
             session.add(user)
             session.commit()

@@ -173,25 +173,25 @@ async def register_user(request: Request, user_data: UserCreate):
             normalized_phone = User.normalize_phone(user_data.phone)
             if not User.is_valid_malaysian_phone(user_data.phone):
                 raise HTTPException(status_code=400, detail="Invalid Malaysian phone number format")
-        
+
         # Create user
         user = await db_service.create_user(
-            email=sanitized_email, 
+            email=sanitized_email,
             password=User.hash_password(password),
             phone=normalized_phone,
-            channel=user_data.channel
+            channel=user_data.channel,
         )
 
         # Create access token
         token = create_access_token(str(user.id))
 
         return UserResponse(
-            id=user.id, 
+            id=user.id,
             external_id=user.external_id,
-            email=user.email, 
+            email=user.email,
             channel=user.channel,
             tier=user.tier.value,
-            token=token
+            token=token,
         )
     except ValueError as ve:
         logger.error("user_registration_validation_failed", error=str(ve), exc_info=True)

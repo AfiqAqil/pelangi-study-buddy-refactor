@@ -14,10 +14,10 @@ from app.core.langgraph.tools import tools
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
-    
+
     def __init__(self, model: str, temperature: float, max_tokens: Optional[int] = None):
         """Initialize the LLM provider.
-        
+
         Args:
             model: Model name/identifier
             temperature: Sampling temperature
@@ -27,28 +27,28 @@ class LLMProvider(ABC):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._llm: Optional[BaseLanguageModel] = None
-    
+
     @abstractmethod
     def _create_llm(self) -> BaseLanguageModel:
         """Create the actual LLM instance.
-        
+
         Returns:
             Configured LLM instance
         """
         pass
-    
+
     @abstractmethod
     def get_model_name(self) -> str:
         """Get the model name for metrics and logging.
-        
+
         Returns:
             Model name string
         """
         pass
-    
+
     def get_llm(self) -> BaseLanguageModel:
         """Get the LLM instance, creating it if necessary.
-        
+
         Returns:
             Configured LLM instance with tools bound
         """
@@ -60,37 +60,37 @@ class LLMProvider(ABC):
                 "llm_provider_initialized",
                 provider=self.__class__.__name__,
                 model=self.get_model_name(),
-                environment=settings.ENVIRONMENT.value
+                environment=settings.ENVIRONMENT.value,
             )
         return self._llm
-    
+
     def _get_environment_kwargs(self) -> Dict[str, Any]:
         """Get environment-specific configuration kwargs.
-        
+
         Returns:
             Dictionary of environment-specific settings
         """
         kwargs = {}
-        
+
         # Development - optimize for cost
         if settings.ENVIRONMENT == Environment.DEVELOPMENT:
             kwargs["top_p"] = 0.8
-            
+
         # Production - optimize for quality
         elif settings.ENVIRONMENT == Environment.PRODUCTION:
             kwargs["top_p"] = 0.95
             kwargs["presence_penalty"] = 0.1
             kwargs["frequency_penalty"] = 0.1
-            
+
         return kwargs
 
 
 class OpenAIProvider(LLMProvider):
     """OpenAI LLM provider implementation."""
-    
+
     def __init__(self, model: str, api_key: str, temperature: float, max_tokens: Optional[int] = None):
         """Initialize OpenAI provider.
-        
+
         Args:
             model: OpenAI model name (e.g., "gpt-4o", "gpt-3.5-turbo")
             api_key: OpenAI API key
@@ -99,10 +99,10 @@ class OpenAIProvider(LLMProvider):
         """
         super().__init__(model, temperature, max_tokens)
         self.api_key = api_key
-    
+
     def _create_llm(self) -> BaseLanguageModel:
         """Create OpenAI ChatOpenAI instance.
-        
+
         Returns:
             Configured ChatOpenAI instance
         """
@@ -112,15 +112,15 @@ class OpenAIProvider(LLMProvider):
             "api_key": self.api_key,
             **self._get_environment_kwargs(),
         }
-        
+
         if self.max_tokens:
             kwargs["max_tokens"] = self.max_tokens
-            
+
         return ChatOpenAI(**kwargs)
-    
+
     def get_model_name(self) -> str:
         """Get model name from OpenAI provider.
-        
+
         Returns:
             Model name string
         """
@@ -129,10 +129,10 @@ class OpenAIProvider(LLMProvider):
 
 class GeminiProvider(LLMProvider):
     """Google Gemini LLM provider implementation."""
-    
+
     def __init__(self, model: str, api_key: str, temperature: float, max_tokens: Optional[int] = None):
         """Initialize Gemini provider.
-        
+
         Args:
             model: Gemini model name (e.g., "gemini-1.5-flash", "gemini-1.5-pro")
             api_key: Google API key
@@ -141,10 +141,10 @@ class GeminiProvider(LLMProvider):
         """
         super().__init__(model, temperature, max_tokens)
         self.api_key = api_key
-    
+
     def _create_llm(self) -> BaseLanguageModel:
         """Create Gemini ChatGoogleGenerativeAI instance.
-        
+
         Returns:
             Configured ChatGoogleGenerativeAI instance
         """
@@ -154,15 +154,15 @@ class GeminiProvider(LLMProvider):
             "google_api_key": self.api_key,
             **self._get_environment_kwargs(),
         }
-        
+
         if self.max_tokens:
             kwargs["max_output_tokens"] = self.max_tokens
-            
+
         return ChatGoogleGenerativeAI(**kwargs)
-    
+
     def get_model_name(self) -> str:
         """Get model name from Gemini provider.
-        
+
         Returns:
             Model name string
         """
@@ -171,15 +171,15 @@ class GeminiProvider(LLMProvider):
 
 def create_llm_provider() -> LLMProvider:
     """Factory function to create appropriate LLM provider based on configuration.
-    
+
     Returns:
         Configured LLM provider instance
-        
+
     Raises:
         ValueError: If provider type is not supported
     """
     provider_type = settings.LLM_PROVIDER.lower()
-    
+
     if provider_type == "openai":
         return OpenAIProvider(
             model=settings.LLM_MODEL,

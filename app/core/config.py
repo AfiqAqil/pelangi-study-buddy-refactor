@@ -5,17 +5,9 @@ for the application. It includes environment detection, .env file loading, and
 configuration value parsing.
 """
 
-import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-    Union,
-)
 
 from dotenv import load_dotenv
 
@@ -155,6 +147,12 @@ class Settings:
         self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
         self.MAX_LLM_CALL_RETRIES = int(os.getenv("MAX_LLM_CALL_RETRIES", "3"))
         self.CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "10"))
+        
+        # Loop Protection Configuration
+        self.MAX_GRAPH_ITERATIONS = int(os.getenv("MAX_GRAPH_ITERATIONS", "20"))
+        self.MAX_CONSECUTIVE_TOOL_FAILURES = int(os.getenv("MAX_CONSECUTIVE_TOOL_FAILURES", "5"))
+        self.MAX_IDENTICAL_TOOL_CALLS = int(os.getenv("MAX_IDENTICAL_TOOL_CALLS", "3"))
+        self.RECENT_TOOL_CALLS_LIMIT = int(os.getenv("RECENT_TOOL_CALLS_LIMIT", "5"))
 
         # JWT Configuration
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
@@ -222,6 +220,9 @@ class Settings:
         self.CHATWOOT_MAX_RETRIES = int(
             os.getenv("CHATWOOT_MAX_RETRIES", "1")
         )  # Optimized: Reduced to 1 retry for faster response
+        
+        # Image attachments are always enabled with fixed limits
+        # No configuration needed - always active
 
         # Redis Configuration
         self.REDIS_ENABLED = os.getenv("REDIS_ENABLED", "true").lower() in ("true", "1", "t", "yes")
@@ -240,6 +241,28 @@ class Settings:
         self.CACHE_MESSAGE_COUNT_TTL = int(os.getenv("CACHE_MESSAGE_COUNT_TTL", "600"))  # Increased to 10 minutes
         self.CACHE_CONVERSATION_TTL = int(os.getenv("CACHE_CONVERSATION_TTL", "1800"))  # 30 minutes
         self.CACHE_CONTACT_TTL = int(os.getenv("CACHE_CONTACT_TTL", "3600"))  # 1 hour
+
+        # RAG System Configuration
+        self.RAG_ENABLED = os.getenv("RAG_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+        
+        # Embedding Model Configuration
+        self.HF_EMBED = os.getenv("HF_EMBED", "Qwen/Qwen3-Embedding-0.6B")
+        
+        # Qdrant Vector Database Configuration
+        self.QDRANT_URL = os.getenv("QDRANT_URL", "")
+        self.QDRANT_KEY = os.getenv("QDRANT_KEY", "")
+        self.QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+        self.QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "test_5")
+        
+        # Gemini LLM Configuration (for RAG)
+        self.GEMINI_KEY = os.getenv("GEMINI_KEY", "")
+        self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        
+        # RAG Performance Settings
+        self.RAG_SIMILARITY_CUTOFF = float(os.getenv("RAG_SIMILARITY_CUTOFF", "0.70"))
+        self.RAG_SIMILARITY_TOP_K = int(os.getenv("RAG_SIMILARITY_TOP_K", "20"))
+        self.RAG_RERANKED_TOP_N = int(os.getenv("RAG_RERANKED_TOP_N", "6"))
+        
 
         # Apply environment-specific settings
         self.apply_environment_settings()

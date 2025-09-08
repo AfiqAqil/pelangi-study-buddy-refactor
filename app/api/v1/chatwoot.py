@@ -3,34 +3,34 @@
 import asyncio
 import json
 import time
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 from fastapi import (
     APIRouter,
-    Request,
-    HTTPException,
-    status,
     BackgroundTasks,
+    HTTPException,
+    Request,
+    status,
 )
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.services.agent import agent_service
-from app.services.user_identification import user_identification_service
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.core.metrics import (
-    chatwoot_webhooks_total,
     chatwoot_message_processing_duration_seconds,
     chatwoot_messages_sent_total,
+    chatwoot_webhooks_total,
 )
 from app.schemas.chatwoot import (
-    ChatwootMessageWebhook,
     ChatwootConversationWebhook,
     ChatwootEventType,
+    ChatwootMessageWebhook,
     MessageMapping,
 )
-from app.services.chatwoot import chatwoot_service, ChatwootServiceError
+from app.services.agent import agent_service
+from app.services.chatwoot import ChatwootServiceError, chatwoot_service
+from app.services.user_identification import user_identification_service
 from app.services.webhook_queue import webhook_queue_service
 
 router = APIRouter()
@@ -38,11 +38,11 @@ router = APIRouter()
 
 async def extract_and_store_contact_info(webhook_data: ChatwootMessageWebhook) -> None:
     """Extract and store contact information from webhook message if not already stored.
-    
+
     This function extracts phone numbers from webhook payloads, but only if we don't
     already have a phone number stored for this contact. This avoids expensive
     repeated extractions and database operations.
-    
+
     Args:
         webhook_data: The parsed Chatwoot webhook payload
     """
@@ -58,7 +58,7 @@ async def extract_and_store_contact_info(webhook_data: ChatwootMessageWebhook) -
                 phone=stored_phone,
             )
             return
-        
+
         # Only extract if we don't have a stored phone number
         phone_from_meta = user_identification_service.extract_phone_from_webhook_meta(webhook_data)
         if phone_from_meta:
@@ -74,7 +74,7 @@ async def extract_and_store_contact_info(webhook_data: ChatwootMessageWebhook) -
             webhook_data.sender.phone = phone_from_meta
             # Store the mapping for future use
             user_identification_service.store_contact_phone_mapping(webhook_data.sender.id, phone_from_meta)
-            
+
     except Exception as e:
         logger.error(
             "contact_info_extraction_failed",
@@ -147,18 +147,18 @@ async def chatwoot_webhook(
                         conversation_id=conversation_id,
                     )
                 else:
-                    # Fallback to direct processing if queue fails
-                    logger.warning(
-                        "chatwoot_queue_failed_using_fallback",
+                    # Log error but DON'T process directly to avoid duplicate processing
+                    # The worker will handle retries
+                    logger.error(
+                        "chatwoot_queue_failed_message_dropped",
                         message_id=webhook_data.id,
                         conversation_id=conversation_id,
                     )
-                    background_tasks.add_task(process_incoming_message, webhook_data)
             else:
                 logger.debug(
-                    "chatwoot_outgoing_message_processed_for_contact_info", 
-                    message_id=webhook_data.id, 
-                    conversation_id=conversation_id
+                    "chatwoot_outgoing_message_processed_for_contact_info",
+                    message_id=webhook_data.id,
+                    conversation_id=conversation_id,
                 )
 
         elif event_type == ChatwootEventType.CONVERSATION_CREATED:
@@ -202,18 +202,21 @@ async def chatwoot_webhook(
         )
 
 
-async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None:
-    """Process an incoming message from Chatwoot.
-
-    This function handles the core logic of processing messages:
-    1. Convert Chatwoot message to internal format
-    2. Generate response using LangGraph agent
-    3. Send response back to Chatwoot
-    4. Handle errors gracefully
+async def _process_incoming_message_deprecated(webhook_data: ChatwootMessageWebhook) -> None:
+    """DEPRECATED: This function should NOT be called directly!
+    
+    WARNING: Message processing should ONLY happen through the webhook worker
+    to avoid duplicate processing and infinite loops.
+    
+    This function is kept for backward compatibility but will be removed.
+    Use the webhook queue/worker system instead.
 
     Args:
         webhook_data: The parsed Chatwoot webhook payload
     """
+    logger.warning("deprecated_process_incoming_message_called", 
+                  message_id=webhook_data.id,
+                  stack_info=True)
     start_time = time.time()
     processing_status = "failed"
 
@@ -223,6 +226,24 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
         conversation = webhook_data.conversation
         sender = webhook_data.sender
         message_content = webhook_data.content
+
+        # IMPORTANT: Skip processing for outgoing messages to prevent loops
+        if webhook_data.message_type == "outgoing":
+            logger.debug(
+                "chatwoot_skipping_outgoing_message",
+                message_id=message_id,
+                conversation_id=conversation.id,
+            )
+            return
+
+        # Skip processing for private messages
+        if webhook_data.private:
+            logger.debug(
+                "chatwoot_skipping_private_message",
+                message_id=message_id,
+                conversation_id=conversation.id,
+            )
+            return
 
         logger.info(
             "chatwoot_processing_message",
@@ -245,20 +266,14 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
                 conversation_id=conversation.id,
                 phone=stored_phone,
             )
+
+        # REMOVED: Phone number checking logic to prevent duplicate processing
+        # The webhook worker handles ALL phone number validation and requests
+        # This avoids sending duplicate "please provide phone" messages
         
-        # Check if we need to request phone number from user
-        requires_phone = user_identification_service.requires_phone_number(sender)
-        
-        logger.info(
-            "phone_requirement_check",
-            contact_id=sender.id,
-            conversation_id=conversation.id,
-            requires_phone=requires_phone,
-            sender_has_phone=bool(sender.phone),
-            sender_phone=sender.phone if sender.phone else None,
-        )
-        
-        if requires_phone:
+        # Simply try to create user with available information
+        # Worker has already handled phone validation if needed
+        if False:  # Disabled - worker handles this
             # First, check if the message contains a phone number
             extracted_phone = user_identification_service.extract_phone_from_message(message_content)
 
@@ -268,7 +283,7 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
 
                 # Store the phone number mapping for future messages
                 mapping_stored = user_identification_service.store_contact_phone_mapping(sender.id, extracted_phone)
-                
+
                 if not mapping_stored:
                     logger.error("chatwoot_invalid_phone_extracted", contact_id=sender.id, phone=extracted_phone)
                     # Fall through to phone request
@@ -327,7 +342,7 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
 
             # Generate session ID and user ID
             session_id = user_identification_service.get_user_session_id(user.id, conversation.id)
-            user_id = f"user_{user.id}"
+            user_id = user.id
 
         # Convert Chatwoot message to internal format
         internal_message = MessageMapping.chatwoot_to_internal(webhook_data)
@@ -338,14 +353,16 @@ async def process_incoming_message(webhook_data: ChatwootMessageWebhook) -> None
         agent = agent_service.get_agent()
         response = await agent.get_response(messages=[internal_message], session_id=session_id, user_id=user_id)
 
-        # Send only NEW assistant messages back to Chatwoot (with concurrent processing)
+        # Send only NEW assistant messages back to Chatwoot (with concurrent processing and image support)
         send_tasks = []
         for agent_msg in response["new_messages"]:
             if agent_msg.role == "assistant" and agent_msg.content:
-                # Convert internal message to Chatwoot format
-                chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
-                # Create concurrent task for sending message
-                send_tasks.append(send_message_with_error_handling(conversation.id, chatwoot_message))
+                # Create concurrent task for sending message with potential images
+                send_tasks.append(send_message_with_images_and_error_handling(
+                    conversation.id, 
+                    agent_msg, 
+                    response  # Pass full response to extract images from citations
+                ))
 
         # Mark conversation as read concurrently with message sending (fire-and-forget)
         asyncio.create_task(mark_conversation_read_with_error_handling(conversation.id))
@@ -471,8 +488,8 @@ async def chatwoot_queue_stats(request: Request) -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: Queue statistics
     """
-    from app.workers.webhook_worker import webhook_worker_pool
     from app.core.circuit_breaker import circuit_breaker_manager
+    from app.workers.webhook_worker import webhook_worker_pool
 
     logger.debug("chatwoot_queue_stats_requested")
 
@@ -496,6 +513,106 @@ async def chatwoot_queue_stats(request: Request) -> Dict[str, Any]:
         "workers": worker_stats,
         "circuit_breaker": circuit_stats,
     }
+
+
+def extract_images_from_agent_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract image data from LangGraph agent response.
+    
+    Args:
+        response: Agent response containing potential RAG citations with images
+        
+    Returns:
+        List[Dict[str, Any]]: List of image data with metadata
+    """
+    # Fast return for empty or invalid responses
+    if not response or not isinstance(response, dict):
+        return []
+    
+    images = []
+    
+    try:
+        # Check for RAG-style citations in response metadata
+        citations = response.get("citations", [])
+        if not citations:
+            # Also check in metadata if available
+            metadata = response.get("metadata", {})
+            citations = metadata.get("citations", [])
+        
+        for citation in citations:
+            # Extract images from citation
+            citation_images = citation.get("images", [])
+            if citation_images:
+                for img in citation_images:
+                    if img.get("url"):
+                        # Include source information from citation
+                        image_data = {
+                            "url": img["url"],
+                            "description": img.get("description", ""),
+                            "caption": img.get("caption", ""),
+                            "spatial_relationship": img.get("spatial_relationship", ""),
+                            "confidence": img.get("confidence", 1.0),
+                            "source": citation.get("source", ""),
+                            "page": citation.get("page", ""),
+                            "type": img.get("type", "diagram"),
+                        }
+                        images.append(image_data)
+        
+        logger.debug("images_extracted_from_response", images_count=len(images))
+        return images
+        
+    except Exception as e:
+        logger.error("image_extraction_failed", error=str(e))
+        return []
+
+
+async def send_message_with_images_and_error_handling(
+    conversation_id: int, 
+    agent_msg,
+    agent_response: Dict[str, Any]
+) -> None:
+    """Send message with images to Chatwoot with proper error handling."""
+    try:
+        # Extract images from agent response
+        images = extract_images_from_agent_response(agent_response)
+        
+        if images:  # Images always enabled
+            # Send message with images
+            responses = await chatwoot_service.send_message_with_images(
+                conversation_id=conversation_id,
+                text_content=agent_msg.content,
+                image_data=images,
+                private=False,
+            )
+            
+            # Track successful message sending
+            chatwoot_messages_sent_total.labels(status="success").inc()
+            logger.debug(
+                "chatwoot_message_with_images_sent",
+                conversation_id=conversation_id,
+                total_messages=len(responses),
+                images_count=len(images),
+            )
+        else:
+            # Fall back to regular text message
+            chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
+            await send_message_with_error_handling(conversation_id, chatwoot_message)
+            
+    except Exception as e:
+        logger.error(
+            "chatwoot_message_with_images_failed",
+            conversation_id=conversation_id,
+            error=str(e),
+        )
+        # Try fallback to text-only message
+        try:
+            chatwoot_message = MessageMapping.internal_to_chatwoot(agent_msg)
+            await send_message_with_error_handling(conversation_id, chatwoot_message)
+        except Exception as fallback_error:
+            logger.error(
+                "chatwoot_fallback_message_failed",
+                conversation_id=conversation_id,
+                error=str(fallback_error),
+            )
 
 
 # Helper functions for concurrent API operations

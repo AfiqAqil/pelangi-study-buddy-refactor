@@ -2,9 +2,7 @@
 
 import asyncio
 from typing import (
-    Any,
     AsyncGenerator,
-    Dict,
     Literal,
     Optional,
 )
@@ -39,6 +37,7 @@ from app.schemas import (
     GraphState,
     Message,
 )
+from app.schemas.graph import ToolResult
 from app.utils import (
     dump_messages,
     prepare_messages,
@@ -66,26 +65,108 @@ class LangGraphAgent:
         """Cleanup resources when the agent is destroyed."""
         # Note: This is a safety net. Proper cleanup should use close_connection_pool()
         if self._connection_pool:
-            logger.warning("connection_pool_not_closed_properly", 
-                         message="Connection pool was not closed properly. Use close_connection_pool()")
+            logger.warning(
+                "connection_pool_not_closed_properly",
+                message="Connection pool was not closed properly. Use close_connection_pool()",
+            )
             # Can't await in destructor, so just set to None
             self._connection_pool = None
 
     def get_model_name(self) -> str:
         """Get the model name from the LLM provider.
-        
+
         Returns:
             str: The model name, handling different provider attribute names
         """
         # Use the provider's centralized method
         return self.llm_provider.get_model_name()
 
-    async def get_message_count_async(self, session_id: str) -> int:
-        """Get message count using native async query.
+    def _detect_language(self, messages: list[str]) -> str:
+        """Detect language from recent user messages.
         
         Args:
-            session_id: Session ID to count messages for
+            messages: List of recent message contents
             
+        Returns:
+            str: Detected language code (en, ms, zh)
+        """
+        combined_text = " ".join(messages)
+        
+        # Simple language detection based on character patterns
+        if not combined_text:
+            return "en"  # Default to English
+        
+        # Check for Chinese characters
+        chinese_chars = sum(1 for char in combined_text if '\u4e00' <= char <= '\u9fff')
+        if chinese_chars > len(combined_text) * 0.1:  # 10% threshold
+            return "zh"
+        
+        # Check for Malay/Indonesian indicators (common words and patterns)
+        malay_indicators = [
+            'adalah', 'dengan', 'yang', 'untuk', 'dalam', 'pada', 'atau', 'juga', 
+            'akan', 'telah', 'sudah', 'belum', 'tidak', 'bukan', 'saya', 'anda',
+            'kita', 'mereka', 'dia', 'ini', 'itu', 'bagaimana', 'mengapa', 'apa'
+        ]
+        
+        words = combined_text.lower().split()
+        malay_word_count = sum(1 for word in words if word in malay_indicators)
+        
+        if len(words) > 0 and malay_word_count / len(words) > 0.15:  # 15% threshold
+            return "ms"
+        
+        return "en"  # Default to English
+    
+    def _create_rag_aware_prompt(self, state: GraphState) -> str:
+        """Create an enhanced system prompt with RAG enforcement hints.
+        
+        Args:
+            state: Current graph state
+            
+        Returns:
+            str: Enhanced system prompt
+        """
+        base_prompt = SYSTEM_PROMPT
+        
+        # Add RAG hints if RAG is enabled
+        if settings.RAG_ENABLED:
+            try:
+                from app.core.rag.classifier import classify_content, ContentType
+                
+                # Get subject context
+                subject_context = state.metadata.get("subject_context", {}) if state.metadata else {}
+                
+                # Get recent user messages for content classification
+                user_messages = [msg for msg in state.messages if hasattr(msg, 'role') and msg.role == "user"]
+                if user_messages:
+                    last_user_message = user_messages[-1].content if hasattr(user_messages[-1], 'content') else ""
+                    
+                    # Classify content type
+                    content_type = classify_content(last_user_message, subject_context)
+                    
+                    # Add educational content hint
+                    if content_type == ContentType.EDUCATIONAL:
+                        hint = "\n🎯 EDUCATIONAL CONTENT DETECTED: Use RAG tools (comprehensive_rag_search, generate_rag_answer, or qdrant_retriever) to provide textbook-based answers."
+                        base_prompt += hint
+                        
+                        logger.debug(
+                            "rag_hint_added_to_prompt",
+                            content_type=content_type.value,
+                            session_id=state.session_id
+                        )
+                
+            except ImportError:
+                logger.debug("rag_classifier_not_available_for_prompt")
+            except Exception as e:
+                logger.error("rag_prompt_enhancement_failed", error=str(e))
+        
+        return base_prompt
+
+    async def get_message_count_async(self, session_id: str) -> int:
+        """Get message count using native async query.
+
+        Args:
+            session_id: Session ID to count messages for
+
         Returns:
             int: Number of messages for the session
         """
@@ -93,29 +174,26 @@ class LangGraphAgent:
         if not connection_pool:
             logger.warning("no_connection_pool_for_message_count", session_id=session_id)
             return 0
-            
+
         try:
             async with connection_pool.connection() as conn:
                 # Query the LangGraph checkpoint tables directly
                 # Use parameterized query to prevent SQL injection
-                result = await conn.fetchval(
-                    """
-                    SELECT COUNT(*) 
-                    FROM checkpoint_writes 
-                    WHERE thread_id = $1 
-                    AND channel = 'messages'
-                    """,
-                    session_id
-                )
-                return result or 0
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        SELECT COUNT(*) 
+                        FROM checkpoint_writes 
+                        WHERE thread_id = %s 
+                        AND channel = 'messages'
+                        """,
+                        (session_id,),
+                    )
+                    result = await cur.fetchone()
+                    return result[0] if result else 0
         except Exception as e:
-            logger.error(
-                "async_message_count_failed", 
-                session_id=session_id, 
-                error=str(e)
-            )
+            logger.error("async_message_count_failed", session_id=session_id, error=str(e))
             return 0
-
 
     async def _get_connection_pool(self) -> AsyncConnectionPool:
         """Get a PostgreSQL connection pool using environment-specific settings.
@@ -182,9 +260,24 @@ class LangGraphAgent:
             state (GraphState): The current state of the conversation.
 
         Returns:
-            dict: Updated state with new messages.
+            dict: Updated state with new messages and incremented iteration count.
         """
-        messages = prepare_messages(state.messages, self.llm, SYSTEM_PROMPT)
+        # Increment iteration counter for loop protection
+        current_iterations = getattr(state, 'iteration_count', 0) + 1
+        
+        logger.debug(
+            "chat_iteration_started",
+            session_id=state.session_id,
+            iteration_count=current_iterations,
+            max_iterations=getattr(state, 'max_iterations', settings.MAX_GRAPH_ITERATIONS)
+        )
+        
+        # Note: RAG enforcement is now handled through tool selection in LLM response
+        # The simplified architecture lets the LLM decide when to use RAG tools based on prompts
+        
+        # Prepare messages with enhanced system prompt for RAG awareness
+        enhanced_system_prompt = self._create_rag_aware_prompt(state)
+        messages = prepare_messages(state.messages, self.llm, enhanced_system_prompt)
 
         llm_calls_num = 0
 
@@ -196,11 +289,15 @@ class LangGraphAgent:
                 # Use the centralized method to get model name
                 model_name = self.get_model_name()
                 with llm_inference_duration_seconds.labels(model=model_name).time():
-                    generated_state = {"messages": [await self.llm.ainvoke(dump_messages(messages))]}
+                    generated_state = {
+                        "messages": [await self.llm.ainvoke(dump_messages(messages))],
+                        "iteration_count": current_iterations
+                    }
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
                     llm_calls_num=llm_calls_num + 1,
+                    iteration_count=current_iterations,
                     model=settings.LLM_MODEL,
                     environment=settings.ENVIRONMENT.value,
                 )
@@ -240,35 +337,110 @@ class LangGraphAgent:
             state: The current agent state containing messages and tool calls.
 
         Returns:
-            Dict with updated messages containing tool responses.
+            Dict with updated messages and last tool result.
         """
         outputs = []
+        last_tool_result = None
+        
         for tool_call in state.messages[-1].tool_calls:
             try:
-                # Execute the tool with error handling
-                tool_result = await self.tools_by_name[tool_call["name"]].ainvoke(tool_call["args"])
+                # Prepare tool arguments with metadata injection
+                tool_args = tool_call["args"].copy()
+
+                # Inject user_id and context for tools that require it
+                tool_name = tool_call["name"]
+                if tool_name in ["select_subject", "get_subject_context"]:
+                    # Get user_id from state metadata
+                    user_id = state.metadata.get("user_id") if state.metadata else None
+                    if user_id:
+                        tool_args["user_id"] = user_id
+                        logger.debug(
+                            "injected_user_id_to_tool",
+                            tool_name=tool_name,
+                            user_id=user_id,
+                            session_id=state.session_id,
+                        )
+                    else:
+                        logger.warning("missing_user_id_for_tool", tool_name=tool_name, session_id=state.session_id)
+                
+                # Inject context for RAG tools
+                elif tool_name in ["qdrant_retriever", "generate_rag_answer", "comprehensive_rag_search"]:
+                    # Get subject context from state metadata
+                    subject_context = state.metadata.get("subject_context", {}) if state.metadata else {}
+                    book_code = subject_context.get("book_code")
+                    
+                    # Inject book_code if available and not already specified
+                    if book_code and "book_code" not in tool_args:
+                        tool_args["book_code"] = book_code
+                        logger.debug(
+                            "injected_book_code_to_rag_tool",
+                            tool_name=tool_name,
+                            book_code=book_code,
+                            session_id=state.session_id,
+                        )
+                    
+                    # Inject session_id for comprehensive_rag_search to enable memory
+                    if tool_name == "comprehensive_rag_search" and "session_id" not in tool_args:
+                        tool_args["session_id"] = state.session_id
+                        logger.debug(
+                            "injected_session_id_to_rag_tool",
+                            tool_name=tool_name,
+                            session_id=state.session_id,
+                        )
+                    
+                    # Auto-detect language if not specified
+                    if "language" not in tool_args:
+                        # Simple language detection based on recent messages
+                        recent_user_messages = [
+                            msg.content for msg in state.messages[-3:] 
+                            if hasattr(msg, 'content') and msg.content
+                        ]
+                        language = self._detect_language(recent_user_messages)
+                        tool_args["language"] = language
+                        logger.debug(
+                            "injected_language_to_rag_tool",
+                            tool_name=tool_name,
+                            language=language,
+                            session_id=state.session_id,
+                        )
+
+                # Execute the tool with enhanced arguments
+                tool_result_raw = await self.tools_by_name[tool_name].ainvoke(tool_args)
+                
+                # Parse ToolResult if it's JSON, otherwise treat as simple string
+                try:
+                    import json
+                    tool_result_dict = json.loads(tool_result_raw)
+                    parsed_result = ToolResult(**tool_result_dict)
+                    last_tool_result = parsed_result
+                    display_content = parsed_result.content
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    # Legacy tool that returns plain string
+                    display_content = tool_result_raw
+                    last_tool_result = ToolResult(
+                        content=tool_result_raw,
+                        status="complete",
+                        next_action="respond_to_user"
+                    )
+                
                 outputs.append(
                     ToolMessage(
-                        content=tool_result,
-                        name=tool_call["name"],
+                        content=display_content,
+                        name=tool_name,
                         tool_call_id=tool_call["id"],
                     )
                 )
-                logger.debug(
-                    "tool_call_success",
-                    tool_name=tool_call["name"],
-                    session_id=state.session_id,
-                )
+                logger.debug("tool_call_success", tool_name=tool_name, session_id=state.session_id)
             except Exception as e:
-                # Return error as tool message instead of failing the entire conversation
                 error_message = f"Tool execution failed: {str(e)}"
-                logger.error(
-                    "tool_call_failed",
-                    tool_name=tool_call["name"],
-                    error=str(e),
-                    session_id=state.session_id,
-                    exc_info=True,
+                logger.error("tool_call_failed", tool_name=tool_call["name"], error=str(e), session_id=state.session_id)
+                
+                last_tool_result = ToolResult(
+                    content=error_message,
+                    status="error",
+                    next_action="retry_or_handle_error"
                 )
+                
                 outputs.append(
                     ToolMessage(
                         content=error_message,
@@ -277,25 +449,75 @@ class LangGraphAgent:
                         additional_kwargs={"error": True, "error_type": type(e).__name__},
                     )
                 )
-        return {"messages": outputs}
+        return {
+            "messages": outputs,
+            "last_tool_result": last_tool_result
+        }
 
     def _should_continue(self, state: GraphState) -> Literal["end", "continue"]:
-        """Determine if the agent should continue or end based on the last message.
+        """Determine if the agent should continue based on basic checks only.
 
+        The tool lifecycle logic will be handled in _should_continue_after_tools.
+        
         Args:
             state: The current agent state containing messages.
 
         Returns:
-            Literal["end", "continue"]: "end" if there are no tool calls, "continue" otherwise.
+            Literal["end", "continue"]: Decision based on tool calls presence and safety checks.
         """
         messages = state.messages
+        if not messages:
+            return "end"
+            
         last_message = messages[-1]
-        # If there is no function call, then we finish
+        
+        # Check 1: No tool calls - normal termination
         if not last_message.tool_calls:
             return "end"
-        # Otherwise if there is, we continue
-        else:
-            return "continue"
+        
+        # Check 2: Iteration limit reached (safety check)
+        current_iterations = getattr(state, 'iteration_count', 0)
+        max_iterations = getattr(state, 'max_iterations', settings.MAX_GRAPH_ITERATIONS)
+        
+        if current_iterations >= max_iterations:
+            logger.warning(
+                "graph_iteration_limit_reached",
+                session_id=state.session_id,
+                iteration_count=current_iterations,
+                max_iterations=max_iterations
+            )
+            return "end"
+        
+        # If tool calls exist and we haven't hit limits, continue to tool execution
+        return "continue"
+
+    def _should_continue_after_tools(self, state: GraphState) -> Literal["end", "continue"]:
+        """Determine if the agent should continue after tool execution based on tool lifecycle.
+
+        Args:
+            state: The current agent state containing tool results.
+
+        Returns:
+            Literal["end", "continue"]: Decision based on tool lifecycle status.
+        """
+        # Check the result of the last tool execution
+        last_tool_result = getattr(state, 'last_tool_result', None)
+        
+        if last_tool_result:
+            if last_tool_result.status == "complete":
+                logger.info(
+                    "tool_lifecycle_complete",
+                    session_id=state.session_id,
+                    next_action=last_tool_result.next_action
+                )
+                return "end"  # Tool is done, let LLM respond to user
+            elif last_tool_result.status in ["retry", "partial"]:
+                return "continue"  # Tool needs more work
+            elif last_tool_result.status == "error":
+                return "continue"  # Allow retry for errors
+        
+        # Default: end and respond (safety fallback)
+        return "end"
 
     async def create_graph(self) -> Optional[CompiledStateGraph]:
         """Create and configure the LangGraph workflow.
@@ -313,7 +535,11 @@ class LangGraphAgent:
                     self._should_continue,
                     {"continue": "tool_call", "end": END},
                 )
-                graph_builder.add_edge("tool_call", "chat")
+                graph_builder.add_conditional_edges(
+                    "tool_call",
+                    self._should_continue_after_tools,
+                    {"continue": "chat", "end": "chat"},
+                )
                 graph_builder.set_entry_point("chat")
                 graph_builder.set_finish_point("chat")
 
@@ -381,6 +607,25 @@ class LangGraphAgent:
         """
         if self._graph is None:
             self._graph = await self.create_graph()
+
+        # Get subject context for the user if available
+        subject_context = {}
+        if user_id:
+            try:
+                from app.services.subject_service import subject_service
+
+                current_subject = await subject_service.get_user_current_subject(user_id)
+                if current_subject:
+                    subject_context = {
+                        "current_subject": current_subject["name"],
+                        "subject_id": current_subject["id"],
+                        "book_code": current_subject.get("book_code"),
+                        "description": current_subject.get("description"),
+                    }
+                    logger.debug("subject_context_added", user_id=user_id, subject=current_subject["name"])
+            except Exception as e:
+                logger.warning("failed_to_get_subject_context", user_id=user_id, error=str(e))
+
         config = {
             "configurable": {"thread_id": session_id},
             "callbacks": [CallbackHandler()],
@@ -389,6 +634,7 @@ class LangGraphAgent:
                 "session_id": session_id,
                 "environment": settings.ENVIRONMENT.value,
                 "debug": False,
+                "subject_context": subject_context,
             },
         }
         try:
@@ -422,10 +668,29 @@ class LangGraphAgent:
                 ttl=600,  # Cache for 10 minutes (longer cache)
             )
 
-            # Invoke the graph with new messages
-            response = await self._graph.ainvoke(
-                {"messages": dump_messages(messages), "session_id": session_id}, config
-            )
+            # Get current state to preserve loop protection fields
+            current_state = None
+            try:
+                current_state = await sync_to_async(self._graph.get_state)(
+                    config={"configurable": {"thread_id": session_id}}
+                )
+            except Exception as e:
+                logger.warning("failed_to_get_current_state", session_id=session_id, error=str(e))
+
+            # Invoke the graph with new messages and subject context, preserving state
+            graph_input = {
+                "messages": dump_messages(messages),
+                "session_id": session_id,
+                "metadata": {
+                    **subject_context,
+                    "user_id": user_id,  # Ensure user_id is available in state
+                },
+                # Preserve tool lifecycle fields from existing state
+                "iteration_count": current_state.values.get("iteration_count", 0) if current_state and current_state.values else 0,
+                "last_tool_result": current_state.values.get("last_tool_result") if current_state and current_state.values else None,
+                "max_iterations": current_state.values.get("max_iterations", settings.MAX_GRAPH_ITERATIONS) if current_state and current_state.values else settings.MAX_GRAPH_ITERATIONS,
+            }
+            response = await self._graph.ainvoke(graph_input, config)
 
             # Process all messages
             all_messages = self.__process_messages(response["messages"])
@@ -479,14 +744,45 @@ class LangGraphAgent:
             self._graph = await self.create_graph()
 
         try:
-            async for token, _ in self._graph.astream(
-                {"messages": dump_messages(messages), "session_id": session_id}, config, stream_mode="messages"
+            seen_tool_calls = False
+            tool_execution_complete = False
+            
+            async for token, _metadata in self._graph.astream(
+                {
+                    "messages": dump_messages(messages),
+                    "session_id": session_id,
+                    "metadata": {"user_id": user_id},  # Include user_id for tool calls
+                },
+                config,
+                stream_mode="messages",
             ):
                 try:
-                    yield token.content
+                    # Track if we've seen tool calls (indicating RAG usage)
+                    if hasattr(token, 'tool_calls') and token.tool_calls:
+                        seen_tool_calls = True
+                        continue  # Skip tool call messages
+                    
+                    # Skip tool response messages
+                    if hasattr(token, 'type') and token.type == 'tool':
+                        tool_execution_complete = True
+                        continue
+                    
+                    # Only yield AI responses
+                    if hasattr(token, 'type') and token.type == 'ai' and hasattr(token, 'content') and token.content:
+                        # If we've seen tool calls, only yield the response after tools are complete
+                        if seen_tool_calls and not tool_execution_complete:
+                            continue  # Skip intermediate AI messages before tool execution
+                        yield token.content
+                    elif hasattr(token, 'content') and token.content:
+                        # Handle messages without explicit type, but exclude tool-related ones
+                        if not (hasattr(token, 'tool_calls') and token.tool_calls):
+                            # Apply same filtering logic for non-typed messages
+                            if seen_tool_calls and not tool_execution_complete:
+                                continue
+                            yield token.content
+                            
                 except Exception as token_error:
                     logger.error("Error processing token", error=str(token_error), session_id=session_id)
-                    # Continue with next token even if current one fails
                     continue
         except Exception as stream_error:
             logger.error("Error in stream processing", error=str(stream_error), session_id=session_id)
@@ -507,10 +803,8 @@ class LangGraphAgent:
         # Use async timeout to prevent hanging
         try:
             state: StateSnapshot = await asyncio.wait_for(
-                sync_to_async(self._graph.get_state)(
-                    config={"configurable": {"thread_id": session_id}}
-                ),
-                timeout=5.0  # 5 second timeout for history retrieval
+                sync_to_async(self._graph.get_state)(config={"configurable": {"thread_id": session_id}}),
+                timeout=5.0,  # 5 second timeout for history retrieval
             )
         except asyncio.TimeoutError:
             logger.warning("chat_history_timeout", session_id=session_id)

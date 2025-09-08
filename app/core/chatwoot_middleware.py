@@ -52,30 +52,6 @@ class ChatwootWebhookMiddleware(BaseHTTPMiddleware):
             # Read request body for debugging
             body = await request.body()
 
-            logger.info(
-                "chatwoot_webhook_debug_request",
-                path=request.url.path,
-                method=request.method,
-                content_type=request.headers.get("content-type", ""),
-                user_agent=request.headers.get("user-agent", ""),
-                body_length=len(body),
-                body_preview=body.decode("utf-8")[:200] + "..." if len(body) > 200 else body.decode("utf-8"),
-            )
-
-            # In development, log the full payload for debugging
-            if settings.ENVIRONMENT.value == "development":
-                try:
-                    full_payload = json.loads(body.decode("utf-8"))
-                    logger.debug(
-                        "chatwoot_webhook_full_payload_debug", path=request.url.path, full_payload=full_payload
-                    )
-                except Exception as parse_error:
-                    logger.warning(
-                        "chatwoot_webhook_payload_parse_error",
-                        error=str(parse_error),
-                        raw_body=body.decode("utf-8")[:500],
-                    )
-
             # Store body in request state for later use (since body can only be read once)
             request.state.body = body
 

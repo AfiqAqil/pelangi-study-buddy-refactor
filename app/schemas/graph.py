@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from typing import Annotated, Dict, Any
+from typing import Annotated, Dict, Any, List, Literal, Optional
 
 from langgraph.graph.message import add_messages
 from pydantic import (
@@ -14,25 +14,32 @@ from pydantic import (
 from app.core.logging import logger
 
 
+class ToolResult(BaseModel):
+    """Result from tool execution with lifecycle information."""
+    
+    content: str = Field(..., description="User-facing message")
+    status: Literal["complete", "partial", "error", "retry"] = Field(..., description="Tool execution status")
+    next_action: Optional[str] = Field(None, description="Hint for next action")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Structured data from tool")
+
+
 class GraphState(BaseModel):
     """State definition for the LangGraph Agent/Workflow with versioning support."""
 
     # Current schema version
-    CURRENT_VERSION: int = 1
+    CURRENT_VERSION: int = 2
 
-    version: int = Field(
-        default=CURRENT_VERSION, 
-        description="State schema version for migrations"
-    )
+    version: int = Field(default=CURRENT_VERSION, description="State schema version for migrations")
     messages: Annotated[list, add_messages] = Field(
-        default_factory=list, 
-        description="The messages in the conversation"
+        default_factory=list, description="The messages in the conversation"
     )
     session_id: str = Field(..., description="The unique identifier for the conversation session")
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional metadata for extensibility"
-    )
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata for extensibility")
+    
+    # Tool lifecycle fields (added in version 2)
+    last_tool_result: Optional[ToolResult] = Field(None, description="Result from last tool execution")
+    max_iterations: int = Field(default=20, description="Maximum allowed chat/tool cycles")
+    iteration_count: int = Field(default=0, description="Number of chat/tool cycles completed")
 
     @field_validator("session_id")
     @classmethod
@@ -60,40 +67,40 @@ class GraphState(BaseModel):
 
     def migrate_to_latest(self) -> "GraphState":
         """Migrate this state to the latest version.
-        
+
         Returns:
             GraphState: Migrated state instance
         """
         if self.version == self.CURRENT_VERSION:
             return self  # Already current version
-        
+
         logger.info(
             "graph_state_migration_start",
             session_id=self.session_id,
             from_version=self.version,
             to_version=self.CURRENT_VERSION,
         )
-        
+
         # Apply migrations step by step
         migrated_state = self
         for target_version in range(self.version + 1, self.CURRENT_VERSION + 1):
             migrated_state = self._migrate_to_version(migrated_state, target_version)
-            
+
         logger.info(
             "graph_state_migration_complete",
             session_id=self.session_id,
             final_version=migrated_state.version,
         )
-        
+
         return migrated_state
 
     def _migrate_to_version(self, state: "GraphState", target_version: int) -> "GraphState":
         """Migrate state to a specific version.
-        
+
         Args:
             state: Current state to migrate
             target_version: Target version to migrate to
-            
+
         Returns:
             GraphState: Migrated state
         """
@@ -103,15 +110,20 @@ class GraphState(BaseModel):
             # For now, version 1 is the initial version
             return state.model_copy(update={"version": 1})
         elif target_version == 2:
-            # Example future migration from v1 to v2 would be implemented here
-            pass
-        
+            # Migration from v1 to v2: Add tool lifecycle fields
+            return state.model_copy(update={
+                "version": 2,
+                "last_tool_result": None,
+                "max_iterations": 20,
+                "iteration_count": 0
+            })
+
         # If no specific migration is needed, just update version
         return state.model_copy(update={"version": target_version})
 
     def is_compatible(self) -> bool:
         """Check if this state version is compatible with current code.
-        
+
         Returns:
             True if compatible, False if migration is needed
         """
@@ -120,7 +132,7 @@ class GraphState(BaseModel):
 
     def get_migration_info(self) -> Dict[str, Any]:
         """Get information about migration requirements.
-        
+
         Returns:
             Dictionary with migration information
         """

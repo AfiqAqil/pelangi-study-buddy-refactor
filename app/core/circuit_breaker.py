@@ -1,10 +1,9 @@
 """Circuit breaker pattern implementation for fault tolerance."""
 
 import asyncio
-import time
 from enum import Enum
 from typing import Any, Callable, Optional, Dict
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import deque
 
 from app.core.logging import logger

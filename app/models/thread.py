@@ -4,16 +4,15 @@ from datetime import (
     UTC,
     datetime,
 )
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from sqlmodel import (
     Field,
-    Relationship,
     SQLModel,
 )
 
 if TYPE_CHECKING:
-    from app.models.user import User
+    pass
 
 
 class Thread(SQLModel, table=True):
@@ -33,14 +32,14 @@ class Thread(SQLModel, table=True):
     id: str = Field(primary_key=True)
     user_id: Optional[str] = Field(default=None, foreign_key="users.id", index=True)
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC), 
+        default_factory=lambda: datetime.now(UTC),
         index=True,  # Index for time-based queries like "recent threads"
-        description="When the thread was created"
+        description="When the thread was created",
     )
     is_active: bool = Field(
-        default=True, 
+        default=True,
         index=True,  # Index for filtering active/inactive threads
-        description="Whether the thread is currently active"
+        description="Whether the thread is currently active",
     )
     title: Optional[str] = Field(default=None, max_length=255)
 

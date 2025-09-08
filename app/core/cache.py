@@ -4,7 +4,7 @@ import functools
 import hashlib
 import json
 import time
-from typing import Any, Callable, Optional, Union
+from typing import Callable, Optional
 
 from app.core.logging import logger
 from app.services.redis import redis_service
