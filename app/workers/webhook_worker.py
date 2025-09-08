@@ -277,7 +277,7 @@ class WebhookWorker:
 
             # Generate session ID and user ID
             session_id = user_identification_service.get_user_session_id(user.id, conversation.id)
-            user_id = f"user_{user.id}"
+            user_id = user.id
 
         # Convert to internal format
         internal_message = MessageMapping.chatwoot_to_internal(webhook)

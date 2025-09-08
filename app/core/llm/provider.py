@@ -1,15 +1,17 @@
 """LLM provider abstraction layer for better testability and flexibility."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from langchain_core.language_models.base import BaseLanguageModel
-from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 from app.core.config import Environment, settings
 from app.core.logging import logger
-from app.core.langgraph.tools import tools
+
+if TYPE_CHECKING:
+    pass
 
 
 class LLMProvider(ABC):
@@ -46,22 +48,31 @@ class LLMProvider(ABC):
         """
         pass
 
-    def get_llm(self) -> BaseLanguageModel:
+    def get_llm(self, bind_tools: bool = False) -> BaseLanguageModel:
         """Get the LLM instance, creating it if necessary.
+        
+        Args:
+            bind_tools: Whether to bind tools to the LLM (default: False)
+                       Tools should be bound by the caller to avoid circular imports
 
         Returns:
-            Configured LLM instance with tools bound
+            Configured LLM instance
         """
         if self._llm is None:
             self._llm = self._create_llm()
-            # Bind tools to the LLM
-            self._llm = self._llm.bind_tools(tools)
             logger.info(
                 "llm_provider_initialized",
                 provider=self.__class__.__name__,
                 model=self.get_model_name(),
                 environment=settings.ENVIRONMENT.value,
             )
+        
+        if bind_tools:
+            # Tools should be bound by the caller to avoid circular imports
+            # This is here for backward compatibility but should not be used
+            logger.warning("get_llm_bind_tools_deprecated", 
+                         message="Binding tools in get_llm is deprecated. Bind tools in the caller.")
+        
         return self._llm
 
     def _get_environment_kwargs(self) -> Dict[str, Any]:
