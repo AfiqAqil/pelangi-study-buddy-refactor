@@ -2,7 +2,7 @@
 
 import re
 import uuid
-from typing import Annotated, Dict, Any, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from langgraph.graph.message import add_messages
 from pydantic import (
@@ -27,7 +27,7 @@ class GraphState(BaseModel):
     """State definition for the LangGraph Agent/Workflow with versioning support."""
 
     # Current schema version
-    CURRENT_VERSION: int = 2
+    CURRENT_VERSION: int = 3
 
     version: int = Field(default=CURRENT_VERSION, description="State schema version for migrations")
     messages: Annotated[list, add_messages] = Field(
@@ -40,6 +40,14 @@ class GraphState(BaseModel):
     last_tool_result: Optional[ToolResult] = Field(None, description="Result from last tool execution")
     max_iterations: int = Field(default=20, description="Maximum allowed chat/tool cycles")
     iteration_count: int = Field(default=0, description="Number of chat/tool cycles completed")
+    
+    # Onboarding state fields (added in version 3)
+    onboarding_data: Dict[str, Any] = Field(default_factory=dict, description="Collected onboarding profile data")
+    onboarding_status: Literal["not_started", "in_progress", "ready_for_confirmation", "completed"] = Field(
+        default="not_started", description="Current onboarding status"
+    )
+    onboarding_missing_fields: List[str] = Field(default_factory=list, description="Fields still needed for onboarding")
+    onboarding_validation_errors: Dict[str, str] = Field(default_factory=dict, description="Validation errors from onboarding")
 
     @field_validator("session_id")
     @classmethod
@@ -116,6 +124,15 @@ class GraphState(BaseModel):
                 "last_tool_result": None,
                 "max_iterations": 20,
                 "iteration_count": 0
+            })
+        elif target_version == 3:
+            # Migration from v2 to v3: Add onboarding state fields
+            return state.model_copy(update={
+                "version": 3,
+                "onboarding_data": {},
+                "onboarding_status": "not_started",
+                "onboarding_missing_fields": [],
+                "onboarding_validation_errors": {}
             })
 
         # If no specific migration is needed, just update version

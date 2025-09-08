@@ -57,6 +57,8 @@ class LangGraphAgent:
         # Create LLM provider using factory
         self.llm_provider = create_llm_provider()
         self.llm = self.llm_provider.get_llm()
+        # Bind tools to the LLM here to avoid circular imports
+        self.llm = self.llm.bind_tools(tools)
         self.tools_by_name = {tool.name: tool for tool in tools}
         self._connection_pool: Optional[AsyncConnectionPool] = None
         self._graph: Optional[CompiledStateGraph] = None
@@ -117,7 +119,7 @@ class LangGraphAgent:
         return "en"  # Default to English
     
     def _create_rag_aware_prompt(self, state: GraphState) -> str:
-        """Create an enhanced system prompt with RAG enforcement hints.
+        """Create an enhanced system prompt with RAG enforcement hints and onboarding detection.
         
         Args:
             state: Current graph state
@@ -126,6 +128,17 @@ class LangGraphAgent:
             str: Enhanced system prompt
         """
         base_prompt = SYSTEM_PROMPT
+        
+        # Add onboarding hint for new users
+        if state.metadata and not state.metadata.get("profile_complete", False):
+            # Check if this looks like a new user interaction
+            user_messages = [msg for msg in state.messages if hasattr(msg, 'role') and msg.role == "user"]
+            if user_messages:
+                first_message = user_messages[0].content.lower() if hasattr(user_messages[0], 'content') else ""
+                greeting_patterns = ["hi", "hello", "hey", "start", "begin", "help", "get started"]
+                
+                if any(pattern in first_message for pattern in greeting_patterns):
+                    base_prompt += "\n\n🔔 NEW USER DETECTED: Start onboarding process with get_onboarding_status then start_onboarding if needed."
         
         # Add RAG hints if RAG is enabled
         if settings.RAG_ENABLED:
@@ -286,20 +299,55 @@ class LangGraphAgent:
 
         for attempt in range(max_retries):
             try:
+                # Safety check: ensure we have messages to send
+                dumped_messages = dump_messages(messages)
+                if not dumped_messages:
+                    logger.error(
+                        "empty_messages_array_detected",
+                        session_id=state.session_id,
+                        iteration_count=current_iterations,
+                        original_message_count=len(state.messages)
+                    )
+                    # Create a fallback message to prevent API error
+                    fallback_message = Message(
+                        role="user", 
+                        content="Hello"  # Simple fallback to get a response
+                    )
+                    dumped_messages = [fallback_message.model_dump()]
+                
                 # Use the centralized method to get model name
                 model_name = self.get_model_name()
                 with llm_inference_duration_seconds.labels(model=model_name).time():
+                    llm_response = await self.llm.ainvoke(dumped_messages)
+                    
+                    # Check if response has no tool calls (pure conversation)
+                    has_tool_calls = hasattr(llm_response, 'tool_calls') and llm_response.tool_calls
+                    
+                    # Reset counter for pure conversational responses if enabled
+                    final_iteration_count = current_iterations
+                    if (not has_tool_calls and settings.RESET_ITERATIONS_ON_COMPLETION and 
+                        current_iterations >= settings.MIN_ITERATIONS_BEFORE_RESET):
+                        final_iteration_count = 0
+                        logger.info(
+                            "iteration_counter_reset_after_llm_response",
+                            session_id=state.session_id,
+                            previous_count=current_iterations,
+                            reset_reason="llm_only_response",
+                            has_tool_calls=has_tool_calls
+                        )
+                    
                     generated_state = {
-                        "messages": [await self.llm.ainvoke(dump_messages(messages))],
-                        "iteration_count": current_iterations
+                        "messages": [llm_response],
+                        "iteration_count": final_iteration_count
                     }
                 logger.info(
                     "llm_response_generated",
                     session_id=state.session_id,
                     llm_calls_num=llm_calls_num + 1,
-                    iteration_count=current_iterations,
+                    iteration_count=final_iteration_count,
                     model=settings.LLM_MODEL,
                     environment=settings.ENVIRONMENT.value,
+                    has_tool_calls=has_tool_calls if 'has_tool_calls' in locals() else False
                 )
                 return generated_state
             except OpenAIError as e:
@@ -349,7 +397,33 @@ class LangGraphAgent:
 
                 # Inject user_id and context for tools that require it
                 tool_name = tool_call["name"]
-                if tool_name in ["select_subject", "get_subject_context"]:
+                
+                # Inject session_id, user_id, and state for onboarding tools
+                if tool_name in ["onboarding_start_tool", "onboarding_parse_tool", "onboarding_confirm_tool", "onboarding_status_tool"]:
+                    tool_args["session_id"] = state.session_id
+                    
+                    # Inject the current state as a dictionary
+                    tool_args["state"] = state.model_dump()
+                    
+                    # Get user_id from state metadata
+                    user_id = state.metadata.get("user_id") if state.metadata else None
+                    if user_id:
+                        tool_args["user_id"] = user_id
+                        logger.debug(
+                            "injected_state_user_id_and_session_id_to_onboarding_tool",
+                            tool_name=tool_name,
+                            session_id=state.session_id,
+                            user_id=user_id,
+                            onboarding_data_keys=list(state.onboarding_data.keys()) if state.onboarding_data else []
+                        )
+                    else:
+                        logger.warning(
+                            "missing_user_id_for_onboarding_tool",
+                            tool_name=tool_name,
+                            session_id=state.session_id
+                        )
+                
+                elif tool_name in ["select_subject", "get_subject_context"]:
                     # Get user_id from state metadata
                     user_id = state.metadata.get("user_id") if state.metadata else None
                     if user_id:
@@ -414,6 +488,20 @@ class LangGraphAgent:
                     parsed_result = ToolResult(**tool_result_dict)
                     last_tool_result = parsed_result
                     display_content = parsed_result.content
+                    
+                    # Check for state updates from tool
+                    if "update_state" in tool_result_dict:
+                        state_updates = tool_result_dict["update_state"]
+                        logger.debug("applying_tool_state_updates", tool_name=tool_name, updates=state_updates, session_id=state.session_id)
+                        
+                        # Apply state updates to the current state
+                        for field, value in state_updates.items():
+                            if hasattr(state, field):
+                                setattr(state, field, value)
+                                logger.debug("state_field_updated", field=field, tool_name=tool_name, session_id=state.session_id)
+                            else:
+                                logger.warning("unknown_state_field_ignored", field=field, tool_name=tool_name, session_id=state.session_id)
+                                
                 except (json.JSONDecodeError, TypeError, ValueError):
                     # Legacy tool that returns plain string
                     display_content = tool_result_raw
@@ -505,6 +593,19 @@ class LangGraphAgent:
         
         if last_tool_result:
             if last_tool_result.status == "complete":
+                # Reset iteration counter on successful tool completion if enabled
+                if settings.RESET_ITERATIONS_ON_COMPLETION:
+                    current_iterations = getattr(state, 'iteration_count', 0)
+                    if current_iterations >= settings.MIN_ITERATIONS_BEFORE_RESET:
+                        state.iteration_count = 0
+                        logger.info(
+                            "iteration_counter_reset_after_tool_completion",
+                            session_id=state.session_id,
+                            previous_count=current_iterations,
+                            reset_reason="tool_completion",
+                            tool_status=last_tool_result.status
+                        )
+                
                 logger.info(
                     "tool_lifecycle_complete",
                     session_id=state.session_id,
@@ -626,9 +727,14 @@ class LangGraphAgent:
             except Exception as e:
                 logger.warning("failed_to_get_subject_context", user_id=user_id, error=str(e))
 
+        # Prepare config with conditional Langfuse callbacks
+        callbacks = []
+        if settings.LANGFUSE_ENABLED:
+            callbacks.append(CallbackHandler())
+        
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": [CallbackHandler()],
+            "callbacks": callbacks,
             "metadata": {
                 "user_id": user_id,
                 "session_id": session_id,
@@ -732,13 +838,16 @@ class LangGraphAgent:
         Yields:
             str: Tokens of the LLM response.
         """
+        # Prepare config with conditional Langfuse callbacks
+        callbacks = []
+        if settings.LANGFUSE_ENABLED:
+            callbacks.append(CallbackHandler(
+                environment=settings.ENVIRONMENT.value, debug=False, user_id=user_id, session_id=session_id
+            ))
+        
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": [
-                CallbackHandler(
-                    environment=settings.ENVIRONMENT.value, debug=False, user_id=user_id, session_id=session_id
-                )
-            ],
+            "callbacks": callbacks,
         }
         if self._graph is None:
             self._graph = await self.create_graph()
@@ -823,13 +932,49 @@ class LangGraphAgent:
         return windowed_messages
 
     def __process_messages(self, messages: list[BaseMessage]) -> list[Message]:
+        """Process messages while preserving tool call sequences."""
         openai_style_messages = convert_to_openai_messages(messages)
-        # keep just assistant and user messages
-        return [
-            Message(**message)
-            for message in openai_style_messages
-            if message["role"] in ["assistant", "user"] and message["content"]
-        ]
+        
+        # Build a map of tool call sequences to determine which tool messages to keep
+        assistant_tool_calls = {}
+        for i, message in enumerate(openai_style_messages):
+            if (message["role"] == "assistant" and 
+                message.get("tool_calls")):
+                # Map each tool call ID to this assistant message index
+                for tool_call in message["tool_calls"]:
+                    tool_call_id = tool_call.get("id")
+                    if tool_call_id:
+                        assistant_tool_calls[tool_call_id] = i
+        
+        processed_messages = []
+        for message in openai_style_messages:
+            # Include assistant and user messages with content
+            if (message["role"] in ["assistant", "user"] and message.get("content")):
+                processed_messages.append(Message(**message))
+            # Include tool messages that respond to assistant tool calls
+            elif (message["role"] == "tool" and 
+                  message.get("tool_call_id") in assistant_tool_calls):
+                # Create a proper tool message
+                processed_messages.append(Message(
+                    role="tool",
+                    content=message.get("content", ""),
+                    tool_call_id=message.get("tool_call_id"),
+                    name=message.get("name", "tool_result")
+                ))
+            # Also include assistant messages without content but with tool_calls
+            elif (message["role"] == "assistant" and 
+                  message.get("tool_calls") and 
+                  not message.get("content")):
+                processed_messages.append(Message(**message))
+        
+        logger.debug(
+            "processed_messages_count",
+            original_count=len(openai_style_messages),
+            processed_count=len(processed_messages),
+            tool_calls_found=len(assistant_tool_calls)
+        )
+        
+        return processed_messages
 
     async def clear_chat_history(self, session_id: str) -> None:
         """Clear all chat history for a given thread ID.

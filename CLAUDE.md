@@ -173,7 +173,8 @@ Critical environment variables that must be set:
 - `LLM_API_KEY`: OpenAI or compatible LLM API key
 - `POSTGRES_URL`: PostgreSQL connection string
 - `JWT_SECRET_KEY`: Secret for JWT signing
-- `LANGFUSE_PUBLIC_KEY` & `LANGFUSE_SECRET_KEY`: For LLM observability
+- `LANGFUSE_ENABLED`: Enable/disable Langfuse observability (default: true)
+- `LANGFUSE_PUBLIC_KEY` & `LANGFUSE_SECRET_KEY`: For LLM observability (when enabled)
 
 Chatwoot integration variables (optional):
 - `CHATWOOT_ENABLED`: Enable/disable Chatwoot integration

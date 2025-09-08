@@ -15,6 +15,12 @@ from .quiz_tools import (
     calculate_quiz_summary_tool,
     get_adaptive_quiz_question_tool
 )
+from .onboarding_tools import (
+    onboarding_start_tool,
+    onboarding_parse_tool,
+    onboarding_confirm_tool,
+    onboarding_status_tool
+)
 
 # Import RAG tools conditionally based on configuration
 try:
@@ -33,6 +39,10 @@ try:
             format_quiz_question_tool,
             calculate_quiz_summary_tool,
             get_adaptive_quiz_question_tool,
+            onboarding_start_tool,
+            onboarding_parse_tool,
+            onboarding_confirm_tool,
+            onboarding_status_tool,
         ]
     else:
         tools: list[BaseTool] = [
@@ -43,6 +53,10 @@ try:
             format_quiz_question_tool,
             calculate_quiz_summary_tool,
             get_adaptive_quiz_question_tool,
+            onboarding_start_tool,
+            onboarding_parse_tool,
+            onboarding_confirm_tool,
+            onboarding_status_tool,
         ]
 except ImportError as e:
     # Fallback if RAG dependencies are not installed
@@ -55,4 +69,8 @@ except ImportError as e:
         format_quiz_question_tool,
         calculate_quiz_summary_tool,
         get_adaptive_quiz_question_tool,
+        onboarding_start_tool,
+        onboarding_parse_tool,
+        onboarding_confirm_tool,
+        onboarding_status_tool,
     ]

@@ -135,6 +135,7 @@ class Settings:
         self.ALLOWED_ORIGINS = parse_list_from_env("ALLOWED_ORIGINS", ["*"])
 
         # Langfuse Configuration
+        self.LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "true").lower() == "true"
         self.LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
         self.LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
         self.LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
@@ -153,6 +154,10 @@ class Settings:
         self.MAX_CONSECUTIVE_TOOL_FAILURES = int(os.getenv("MAX_CONSECUTIVE_TOOL_FAILURES", "5"))
         self.MAX_IDENTICAL_TOOL_CALLS = int(os.getenv("MAX_IDENTICAL_TOOL_CALLS", "3"))
         self.RECENT_TOOL_CALLS_LIMIT = int(os.getenv("RECENT_TOOL_CALLS_LIMIT", "5"))
+        
+        # Iteration counter reset behavior
+        self.RESET_ITERATIONS_ON_COMPLETION = os.getenv("RESET_ITERATIONS_ON_COMPLETION", "true").lower() == "true"
+        self.MIN_ITERATIONS_BEFORE_RESET = int(os.getenv("MIN_ITERATIONS_BEFORE_RESET", "3"))
 
         # JWT Configuration
         self.JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
