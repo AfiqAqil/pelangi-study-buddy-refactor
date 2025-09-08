@@ -189,6 +189,12 @@ class RAGService:
             
             response = await llm_model.acomplete(formatted_prompt)
 
+            logger.info(
+                "rag_answer_generated",
+                query=query[:100],
+                formatted_prompt=formatted_prompt[:300],
+                response=response.text[:300],
+            )
             result = {
                 "answer": response.text,
                 "citations": citations,

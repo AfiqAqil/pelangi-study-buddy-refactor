@@ -33,7 +33,7 @@ def get_prompt_file_path(filename: str) -> str:
     """
     prompts_dir = os.path.join(
         os.path.dirname(__file__), 
-        "..", "core", "prompts"
+        "..", "core", "constants", "prompts"
     )
     return os.path.abspath(os.path.join(prompts_dir, filename))
 
