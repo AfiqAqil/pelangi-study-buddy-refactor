@@ -6,7 +6,7 @@ from datetime import (
     datetime,
     timedelta,
 )
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from jose import (
     JWTError,
@@ -17,6 +17,9 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.schemas.auth import Token
 from app.utils.sanitization import sanitize_string
+
+if TYPE_CHECKING:
+    from app.models.session import Session
 
 
 def create_access_token(thread_id: str, expires_delta: Optional[timedelta] = None) -> Token:
@@ -82,4 +85,37 @@ def verify_token(token: str) -> Optional[str]:
 
     except JWTError as e:
         logger.error("token_verification_failed", error=str(e))
+        return None
+
+
+async def get_session_from_token(token: str) -> Optional["Session"]:
+    """Get session object from JWT token.
+
+    Args:
+        token: The JWT token to verify and extract session from.
+
+    Returns:
+        Optional[Session]: The session object if token is valid and session exists, None otherwise.
+    """
+    from app.services.database import database_service
+    from app.models.session import Session
+    
+    try:
+        # First verify the token and get session ID
+        session_id = verify_token(token)
+        if not session_id:
+            logger.debug("get_session_from_token_invalid_token")
+            return None
+        
+        # Query database for the session
+        session = await database_service.get_session(session_id)
+        if not session:
+            logger.debug("get_session_from_token_session_not_found", session_id=session_id)
+            return None
+        
+        logger.debug("get_session_from_token_success", session_id=session_id, user_id=session.user_id)
+        return session
+        
+    except Exception as e:
+        logger.error("get_session_from_token_failed", error=str(e))
         return None

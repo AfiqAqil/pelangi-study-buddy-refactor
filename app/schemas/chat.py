@@ -2,14 +2,18 @@
 
 import re
 from typing import (
+    Any,
+    Dict,
     List,
     Literal,
+    Optional,
 )
 
 from pydantic import (
     BaseModel,
     Field,
     field_validator,
+    model_validator,
     ValidationInfo,
 )
 
@@ -18,51 +22,56 @@ class Message(BaseModel):
     """Message model for chat endpoint.
 
     Attributes:
-        role: The role of the message sender (user or assistant).
+        role: The role of the message sender (user, assistant, system, or tool).
         content: The content of the message.
+        tool_call_id: ID of the tool call (for tool messages).
+        name: Name of the tool (for tool messages).
     """
 
     model_config = {"extra": "ignore"}
 
-    role: Literal["user", "assistant", "system"] = Field(..., description="The role of the message sender")
-    content: str = Field(..., description="The content of the message", min_length=1)
+    role: Literal["user", "assistant", "system", "tool"] = Field(..., description="The role of the message sender")
+    content: str = Field(..., description="The content of the message")
+    tool_call_id: Optional[str] = Field(None, description="ID of the tool call (for tool messages)")
+    name: Optional[str] = Field(None, description="Name of the tool (for tool messages)")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls (for assistant messages)")
 
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, v: str, info: ValidationInfo) -> str:
-        """Validate the message content with role-specific length limits.
-
-        Args:
-            v: The content to validate
-            info: ValidationInfo containing field data
-
-        Returns:
-            str: The validated content
-
-        Raises:
-            ValueError: If the content contains disallowed patterns or exceeds length limits
-        """
-        # Get role from the model data
-        role = info.data.get("role") if info.data else None
+    @model_validator(mode='after')
+    def validate_message(self):
+        """Validate the complete message with role-specific rules."""
+        role = self.role
+        content = self.content
+        tool_calls = getattr(self, 'tool_calls', None)
+        
+        # Tool messages and assistant messages with tool_calls can have empty content
+        # Others need at least 1 character
+        has_tool_calls = tool_calls and len(tool_calls) > 0
+        
+        if role not in ["tool"] and not has_tool_calls and len(content) < 1:
+            raise ValueError("Content must be at least 1 character for messages without tool_calls")
         
         # Apply role-specific length limits
         if role == "system":
             max_length = 15000  # Allow longer system prompts
+        elif role == "tool":
+            max_length = 5000   # Allow longer tool responses
         else:
             max_length = 3000   # Limit user/assistant messages
         
-        if len(v) > max_length:
+        if len(content) > max_length:
             raise ValueError(f"Content exceeds maximum length of {max_length} characters for {role} messages")
         
-        # Check for potentially harmful content
-        if re.search(r"<script.*?>.*?</script>", v, re.IGNORECASE | re.DOTALL):
-            raise ValueError("Content contains potentially harmful script tags")
+        # Skip script and null byte validation for tool messages (they might contain technical content)
+        if role != "tool":
+            # Check for potentially harmful content
+            if re.search(r"<script.*?>.*?</script>", content, re.IGNORECASE | re.DOTALL):
+                raise ValueError("Content contains potentially harmful script tags")
 
-        # Check for null bytes
-        if "\0" in v:
-            raise ValueError("Content contains null bytes")
+            # Check for null bytes
+            if "\0" in content:
+                raise ValueError("Content contains null bytes")
 
-        return v
+        return self
 
 
 class ChatRequest(BaseModel):
