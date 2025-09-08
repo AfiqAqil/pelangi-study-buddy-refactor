@@ -188,16 +188,6 @@ class RAGService:
             llm_model = model_manager.get_llm_model()
             
             response = await llm_model.acomplete(formatted_prompt)
-            
-            logger.info(
-                "rag_answer_generated",
-                query=query[:100],
-                prompt=formatted_prompt,
-                answer_length=len(response.text),
-                citations_count=len(citations),
-                language=language,
-                response=response.text
-            )
 
             result = {
                 "answer": response.text,
@@ -207,14 +197,6 @@ class RAGService:
                 "query": query,
                 "timestamp": datetime.utcnow().isoformat()
             }
-            
-            logger.info(
-                "rag_answer_generated",
-                query=query[:100],
-                answer_length=len(response.text),
-                citations_count=len(citations),
-                language=language
-            )
             
             return result
             
